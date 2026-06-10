@@ -18,8 +18,8 @@ var selectCmd = &cobra.Command{
 			return err
 		}
 
-		if len(cfg.Nodes) == 0 {
-			return fmt.Errorf("no nodes available. Please run 'tuncli update' first.")
+		if len(cfg.Subscriptions) == 0 {
+			return fmt.Errorf("no subscriptions or servers added yet. Please run 'tuncli add <link>' first.")
 		}
 
 		// 1. Select Mode
@@ -35,10 +35,33 @@ var selectCmd = &cobra.Command{
 		}
 		cfg.Mode = selectedMode
 
-		// 2. Select Node
+		// 2. Load all nodes across subscriptions
+		type nodeOption struct {
+			SubID    string
+			NodeName string
+			Display  string
+		}
+
+		var options []nodeOption
 		var nodeNames []string
-		for _, n := range cfg.Nodes {
-			nodeNames = append(nodeNames, n.Name)
+		for _, sub := range cfg.Subscriptions {
+			nodes, err := config.LoadSubscriptionNodes(sub.ID)
+			if err != nil {
+				continue
+			}
+			for _, n := range nodes {
+				display := fmt.Sprintf("[%s] %s", sub.Name, n.Name)
+				options = append(options, nodeOption{
+					SubID:    sub.ID,
+					NodeName: n.Name,
+					Display:  display,
+				})
+				nodeNames = append(nodeNames, display)
+			}
+		}
+
+		if len(nodeNames) == 0 {
+			return fmt.Errorf("no nodes available. Please run 'tuncli update' first.")
 		}
 
 		nodePrompt := &survey.Select{
@@ -48,24 +71,39 @@ var selectCmd = &cobra.Command{
 		}
 
 		// Set default if valid
-		if cfg.SelectedNodeIndex >= 0 && cfg.SelectedNodeIndex < len(nodeNames) {
-			nodePrompt.Default = nodeNames[cfg.SelectedNodeIndex]
+		if cfg.SelectedSubscription != "" && cfg.SelectedNode != "" {
+			for _, opt := range options {
+				if opt.SubID == cfg.SelectedSubscription && opt.NodeName == cfg.SelectedNode {
+					nodePrompt.Default = opt.Display
+					break
+				}
+			}
 		}
 
-		var selectedNodeIndex int
-		err = survey.AskOne(nodePrompt, &selectedNodeIndex)
+		var selectedDisplay string
+		err = survey.AskOne(nodePrompt, &selectedDisplay)
 		if err != nil {
 			return err
 		}
 
-		cfg.SelectedNodeIndex = selectedNodeIndex
+		// Find the selected option
+		var selectedOpt nodeOption
+		for _, opt := range options {
+			if opt.Display == selectedDisplay {
+				selectedOpt = opt
+				break
+			}
+		}
+
+		cfg.SelectedSubscription = selectedOpt.SubID
+		cfg.SelectedNode = selectedOpt.NodeName
 
 		err = config.SaveConfig(cfg)
 		if err != nil {
 			return fmt.Errorf("failed to save config: %w", err)
 		}
 
-		fmt.Printf("Successfully selected node: %s\nMode set to: %s\n", cfg.Nodes[selectedNodeIndex].Name, cfg.Mode)
+		fmt.Printf("Successfully selected node: %s\nMode set to: %s\n", cfg.SelectedNode, cfg.Mode)
 		return nil
 	},
 }
@@ -73,3 +111,4 @@ var selectCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(selectCmd)
 }
+

@@ -15,11 +15,29 @@ import (
 )
 
 func Start(cfg *config.Config) error {
-	if cfg.SelectedNodeIndex < 0 || cfg.SelectedNodeIndex >= len(cfg.Nodes) {
+	if cfg.SelectedSubscription == "" || cfg.SelectedNode == "" {
 		return fmt.Errorf("no valid node selected. Run 'tuncli select' first.")
 	}
 
-	node := cfg.Nodes[cfg.SelectedNodeIndex]
+	nodes, err := config.LoadSubscriptionNodes(cfg.SelectedSubscription)
+	if err != nil {
+		return fmt.Errorf("failed to load nodes for selected subscription: %w", err)
+	}
+
+	var node config.Node
+	found := false
+	for _, n := range nodes {
+		if n.Name == cfg.SelectedNode {
+			node = n
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		return fmt.Errorf("selected node %q not found in subscription %q. Please run 'tuncli select' again.", cfg.SelectedNode, cfg.SelectedSubscription)
+	}
+
 	fmt.Printf("Starting VPN with node: %s [%s]\n", node.Name, cfg.Mode)
 
 	ctx := context.Background()
