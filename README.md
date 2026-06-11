@@ -2,13 +2,13 @@
 
 `tuncli` is a minimalist CLI wrapper for `sing-box` to fetch subscriptions and manage VPN connections in TUN or Proxy modes.
 
-## Supported Operating Systems
+## Supported OS
 
-| Operating System | Architectures | Supported | Notes |
-| :--- | :--- | :---: | :--- |
-| **Linux** | `x86_64` (amd64), `ARM64` (aarch64) | Yes | **TUN** mode requires `sudo`. **Proxy** mode can run as normal user. |
-| **macOS** | None | No | Not supported by `install.sh`. |
-| **Windows** | None | No | Not supported by `install.sh`. |
+| OS          | Architectures                       | Supported |
+| :---------- | :---------------------------------- | :-------: |
+| **Linux**   | `x86_64` (amd64), `ARM64` (aarch64) |    Yes    |
+| **macOS**   | None                                |    No     |
+| **Windows** | None                                |    No     |
 
 ## Installation
 
@@ -69,7 +69,8 @@ sudo tuncli start
 ## Configuration
 
 Settings are stored at:
-* `~/.config/tuncli/config.json`
+
+- `~/.config/tuncli/config.json`
 
 > [!NOTE]
 > When run with `sudo` or `doas`, `tuncli` automatically resolves the original user (`SUDO_USER` / `DOAS_USER`) to read and write config files from/to their home directory rather than the root user's home.
