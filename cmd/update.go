@@ -113,4 +113,3 @@ func updateSubscription(item config.SubscriptionItem) error {
 func init() {
 	rootCmd.AddCommand(updateCmd)
 }
-

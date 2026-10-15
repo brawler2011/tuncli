@@ -111,4 +111,3 @@ var selectCmd = &cobra.Command{
 func init() {
 	rootCmd.AddCommand(selectCmd)
 }
-

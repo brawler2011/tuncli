@@ -20,12 +20,39 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/brawler2011/tuncli/main/
 
 ### From Source
 
-Ensure Go is installed, then build and install:
+Install Go (at least the version declared in `go.mod`), GNU Make, and a C
+compiler for local builds. Build and install on Linux:
 
 ```bash
 make build
 sudo make install
 ```
+
+The binary is written to `build/tuncli`. To install without root, use
+`make install PREFIX="$HOME/.local"` and add `~/.local/bin` to your `PATH`.
+For packaging, `make install DESTDIR=/tmp/tuncli-package` stages the binary at
+`/tmp/tuncli-package/usr/local/bin/tuncli`.
+
+## Development
+
+```bash
+make help       # List available commands
+make fmt        # Format Go sources
+make check      # Check formatting, run go vet and tests
+make build      # Build locally (also the default for make)
+make release    # Create Linux amd64 and arm64 archives in dist/
+make clean      # Remove build/ and dist/
+```
+
+Builds, tests, and vet share the feature tags in the Makefile. CI runs the same
+checks and build for pushes and pull requests; tagged releases run checks before
+packaging and publishing. Release builds disable CGO and require tar.
+Tests do not require root or an active VPN connection.
+
+Override `GO`, `BUILD_DIR`, or `DIST_DIR` when needed, for example
+`make build GO=/path/to/go BUILD_DIR=build/debug`. `make clean` only accepts
+directories inside the repository. Build outputs, coverage results, and local
+environment files are ignored by Git; `.env.example` can be committed.
 
 ---
 
