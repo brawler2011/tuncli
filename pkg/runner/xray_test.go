@@ -3,6 +3,7 @@ package runner
 import (
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"os/exec"
@@ -235,7 +236,8 @@ func TestXrayLifecycleAndRepeatedStop(t *testing.T) {
 	default:
 		t.Fatal("child not reaped")
 	}
-	assert.NoFileExists(t, sidecar.ConfigFile)
+	_, err = os.Stat(sidecar.ConfigFile)
+	require.ErrorIs(t, err, fs.ErrNotExist)
 }
 
 func TestXrayStartupFailureCleansConfig(t *testing.T) {
