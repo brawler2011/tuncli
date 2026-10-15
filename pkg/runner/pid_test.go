@@ -7,32 +7,27 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
 func TestProcessFileLockAndStaleState(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "runtime")
 	release, err := acquireProcessFile(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	if other, err := acquireProcessFile(dir); err == nil {
 		other()
 		t.Fatal("second start succeeded")
 	}
 	release()
-	if err := stopProcessFile(dir); err == nil {
-		t.Fatal("stale state accepted")
-	}
+	err = stopProcessFile(dir)
+	require.Error(t, err)
 	release, err = acquireProcessFile(dir)
-	if err != nil {
-		t.Fatalf("restart: %v", err)
-	}
+	require.NoError(t, err)
 	release()
 }
 
@@ -41,37 +36,23 @@ func TestProcessFileRejectsUnsafePaths(t *testing.T) {
 		t.Run(kind, func(t *testing.T) {
 			base := t.TempDir()
 			dir := filepath.Join(base, "runtime")
-			if err := os.Mkdir(dir, 0700); err != nil {
-				t.Fatal(err)
-			}
+			require.NoError(t, os.Mkdir(dir, 0700))
 			pid := filepath.Join(dir, "tuncli.pid")
 			switch kind {
 			case "directory symlink":
 				link := filepath.Join(base, "link")
-				if err := os.Symlink(dir, link); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.Symlink(dir, link))
 				dir = link
 			case "directory permissions":
-				if err := os.Chmod(dir, 0755); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.Chmod(dir, 0755))
 			case "file symlink":
-				if err := os.Symlink(filepath.Join(base, "target"), pid); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.Symlink(filepath.Join(base, "target"), pid))
 			case "file permissions":
-				if err := os.WriteFile(pid, []byte("unchanged"), 0644); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.WriteFile(pid, []byte("unchanged"), 0644))
 			case "hardlink":
 				target := filepath.Join(base, "target")
-				if err := os.WriteFile(target, []byte("unchanged"), 0600); err != nil {
-					t.Fatal(err)
-				}
-				if err := os.Link(target, pid); err != nil {
-					t.Fatal(err)
-				}
+				require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0600))
+				require.NoError(t, os.Link(target, pid))
 			}
 			if release, err := acquireProcessFile(dir); err == nil {
 				release()
@@ -83,29 +64,21 @@ func TestProcessFileRejectsUnsafePaths(t *testing.T) {
 
 func TestVerifiedProcessRejectsReusedAndForeignPID(t *testing.T) {
 	start, err := processStartTime(os.Getpid())
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	if fd, err := verifiedProcess(ProcessInfo{TuncliPID: os.Getpid(), StartTime: "0"}); err == nil {
-		unix.Close(fd)
+		require.NoError(t, unix.Close(fd))
 		t.Fatal("reused PID accepted")
 	}
 	fd, err := verifiedProcess(ProcessInfo{TuncliPID: os.Getpid(), StartTime: start})
-	if err != nil {
-		t.Fatal(err)
-	}
-	unix.Close(fd)
+	require.NoError(t, err)
+	require.NoError(t, unix.Close(fd))
 	child := exec.Command("sleep", "30")
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, child.Start())
 	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
 	start, err = processStartTime(child.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	if fd, err := verifiedProcess(ProcessInfo{TuncliPID: child.Process.Pid, StartTime: start}); err == nil {
-		unix.Close(fd)
+		require.NoError(t, unix.Close(fd))
 		t.Fatal("foreign executable accepted")
 	}
 }
@@ -113,29 +86,19 @@ func TestVerifiedProcessRejectsReusedAndForeignPID(t *testing.T) {
 func TestStopRefusesLockedForeignPID(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "runtime")
 	release, err := acquireProcessFile(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	defer release()
 	child := exec.Command("sleep", "30")
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, child.Start())
 	defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
 	start, err := processStartTime(child.Process.Pid)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	data, _ := json.Marshal(ProcessInfo{TuncliPID: child.Process.Pid, StartTime: start})
-	if err := os.WriteFile(filepath.Join(dir, "tuncli.pid"), data, 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := stopProcessFile(dir); err == nil || !strings.Contains(err.Error(), "unverified") {
-		t.Fatalf("expected refusal, got %v", err)
-	}
-	if err := child.Process.Signal(syscall.Signal(0)); err != nil {
-		t.Fatalf("foreign process was signaled: %v", err)
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "tuncli.pid"), data, 0600))
+	err = stopProcessFile(dir)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unverified")
+	require.NoError(t, child.Process.Signal(syscall.Signal(0)))
 }
 
 func TestProcessHelper(t *testing.T) {
@@ -149,7 +112,8 @@ func TestProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(2)
 	}
-	os.Stdout.WriteString("ready\n")
+	_, err = os.Stdout.WriteString("ready\n")
+	require.NoError(t, err)
 	<-signals
 	release()
 	os.Exit(0)
@@ -160,12 +124,8 @@ func TestStopGracefullyTerminatesOwnedProcess(t *testing.T) {
 	child := exec.Command(os.Args[0], "-test.run=^TestProcessHelper$")
 	child.Env = append(os.Environ(), "TUNCLI_PROCESS_HELPER="+dir)
 	stdout, err := child.StdoutPipe()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := child.Start(); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
+	require.NoError(t, child.Start())
 	defer func() { _ = child.Process.Kill() }()
 	done := make(chan error, 1)
 	go func() { done <- child.Wait() }()
@@ -173,24 +133,17 @@ func TestStopGracefullyTerminatesOwnedProcess(t *testing.T) {
 	go func() { s := bufio.NewScanner(stdout); ready <- s.Scan() && s.Text() == "ready" }()
 	select {
 	case ok := <-ready:
-		if !ok {
-			t.Fatal("helper failed")
-		}
+		require.True(t, ok)
 	case <-time.After(5 * time.Second):
 		t.Fatal("helper timeout")
 	}
-	if err := stopProcessFile(dir); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, stopProcessFile(dir))
 	select {
 	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, err)
 	case <-time.After(5 * time.Second):
 		t.Fatal("child still running")
 	}
-	if err := stopProcessFile(dir); err == nil {
-		t.Fatal("second stop succeeded")
-	}
+	err = stopProcessFile(dir)
+	require.Error(t, err)
 }

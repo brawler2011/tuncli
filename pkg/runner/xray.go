@@ -68,7 +68,7 @@ func GetDefaultInterface() string {
 	return ""
 }
 
-func getEffectiveRawConfig(node *config.Node) map[string]interface{} {
+func getEffectiveRawConfig(node *config.Node) map[string]any {
 	if node == nil {
 		return nil
 	}
@@ -115,17 +115,17 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		} else if p, ok := rawConfig["port"].(float64); ok {
 			port = int(p)
 		} else if pStr, ok := rawConfig["port"].(string); ok {
-			fmt.Sscanf(pStr, "%d", &port)
+			_, _ = fmt.Sscanf(pStr, "%d", &port) // Keep the default if the optional number is invalid.
 		}
 	}
 
 	uuid, _ := rawConfig["uuid"].(string)
 
 	// Stream settings
-	streamSettings := map[string]interface{}{
+	streamSettings := map[string]any{
 		"network": "xhttp",
 	}
-	sockopt := make(map[string]interface{})
+	sockopt := make(map[string]any)
 	if mark > 0 {
 		sockopt["mark"] = mark
 	}
@@ -139,7 +139,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 	// Security: Reality vs TLS vs None
 	pbk, _ := rawConfig["pbk"].(string)
 	sid, _ := rawConfig["sid"].(string)
-	if realityOpts, ok := rawConfig["reality-opts"].(map[string]interface{}); ok {
+	if realityOpts, ok := rawConfig["reality-opts"].(map[string]any); ok {
 		if pk, ok := realityOpts["public-key"].(string); ok && pk != "" {
 			pbk = pk
 		}
@@ -173,7 +173,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 	}
 
 	if pbk != "" || sec == "reality" {
-		realitySettings := map[string]interface{}{
+		realitySettings := map[string]any{
 			"show":        false,
 			"fingerprint": fp,
 			"serverName":  sni,
@@ -186,7 +186,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		streamSettings["security"] = "reality"
 		streamSettings["realitySettings"] = realitySettings
 	} else if isTLS || sec == "tls" {
-		tlsSettings := map[string]interface{}{
+		tlsSettings := map[string]any{
 			"serverName":  sni,
 			"fingerprint": fp,
 		}
@@ -218,7 +218,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		host = sni
 	}
 
-	xhttpSettings := map[string]interface{}{
+	xhttpSettings := map[string]any{
 		"path": path,
 		"mode": mode,
 	}
@@ -233,7 +233,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 			headers[k] = fmt.Sprint(v)
 		}
 	}
-	if customHeaders, ok := rawConfig["headers"].(map[string]interface{}); ok {
+	if customHeaders, ok := rawConfig["headers"].(map[string]any); ok {
 		for k, v := range customHeaders {
 			if !strings.EqualFold(k, "host") {
 				headers[k] = fmt.Sprint(v)
@@ -278,7 +278,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 	if server == "" || port <= 0 || port > 65535 || uuid == "" {
 		return nil, fmt.Errorf("XHTTP node requires server, valid port and UUID")
 	}
-	var outboundSettings map[string]interface{}
+	var outboundSettings map[string]any
 	switch proto {
 	case "vmess":
 		alterID := 0
@@ -291,12 +291,12 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		if cipher == "" {
 			cipher = "auto"
 		}
-		outboundSettings = map[string]interface{}{
-			"vnext": []map[string]interface{}{
+		outboundSettings = map[string]any{
+			"vnext": []map[string]any{
 				{
 					"address": dialAddress,
 					"port":    port,
-					"users": []map[string]interface{}{
+					"users": []map[string]any{
 						{
 							"id":       uuid,
 							"alterId":  alterID,
@@ -307,19 +307,19 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 			},
 		}
 	default: // vless
-		userObj := map[string]interface{}{
+		userObj := map[string]any{
 			"id":         uuid,
 			"encryption": "none",
 		}
 		if flow, ok := rawConfig["flow"].(string); ok && flow != "" {
 			userObj["flow"] = flow
 		}
-		outboundSettings = map[string]interface{}{
-			"vnext": []map[string]interface{}{
+		outboundSettings = map[string]any{
+			"vnext": []map[string]any{
 				{
 					"address": dialAddress,
 					"port":    port,
-					"users": []map[string]interface{}{
+					"users": []map[string]any{
 						userObj,
 					},
 				},
@@ -327,22 +327,22 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		}
 	}
 
-	cfg := map[string]interface{}{
-		"log": map[string]interface{}{
+	cfg := map[string]any{
+		"log": map[string]any{
 			"loglevel": "warning",
 		},
-		"inbounds": []map[string]interface{}{
+		"inbounds": []map[string]any{
 			{
 				"listen":   "127.0.0.1",
 				"port":     socksPort,
 				"protocol": "socks",
-				"settings": map[string]interface{}{
+				"settings": map[string]any{
 					"auth": "noauth",
 					"udp":  true,
 				},
 			},
 		},
-		"outbounds": []map[string]interface{}{
+		"outbounds": []map[string]any{
 			{
 				"protocol":       proto,
 				"settings":       outboundSettings,
@@ -400,7 +400,7 @@ func getFreePort(preferred int) (int, error) {
 	if err != nil {
 		return 0, fmt.Errorf("failed to find free port: %w", err)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	addr := ln.Addr().(*net.TCPAddr)
 	return addr.Port, nil
 }
@@ -485,13 +485,13 @@ func startXraySidecar(node *config.Node, preferredPort int, xrayPath string, tun
 
 	// Wait for Xray to be listening on socks port or exit with error
 	ready := false
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		time.Sleep(50 * time.Millisecond)
 
 		select {
 		case <-sidecar.done:
 			_ = sidecar.Stop()
-			return nil, fmt.Errorf("xray process exited unexpectedly: %v: %s", sidecar.waitErr, strings.TrimSpace(errBuf.String()))
+			return nil, fmt.Errorf("xray process exited unexpectedly: %w: %s", sidecar.waitErr, strings.TrimSpace(errBuf.String()))
 		default:
 		}
 

@@ -35,16 +35,28 @@ For packaging, `make install DESTDIR=/tmp/tuncli-package` stages the binary at
 
 ## Development
 
+Install golangci-lint (the same version used by CI) and add `$(go env GOPATH)/bin`
+to your `PATH`:
+
+```bash
+go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
+```
+
 ```bash
 make help       # List available commands
 make fmt        # Format Go sources
-make check      # Check formatting, run go vet and tests
+make lint       # Run golangci-lint, including modernize and testifylint
+make check      # Check formatting, run linters and tests
 make build      # Build locally (also the default for make)
 make release    # Create Linux amd64 and arm64 archives in dist/
 make clean      # Remove build/ and dist/
 ```
 
-Builds, tests, and vet share the feature tags in the Makefile. CI runs the same
+The linter configuration enables the standard checks (including govet, staticcheck,
+errcheck, and unused), plus bodyclose, errorlint, modernize, and testifylint.
+Tests use testify: `require` for prerequisites and `assert` for independent checks.
+
+Builds, tests, vet, and linters share the feature tags in the Makefile. CI runs the same
 checks and build for pushes and pull requests; tagged releases run checks before
 packaging and publishing. Release builds disable CGO and require tar.
 Tests do not require root or an active VPN connection. If `xray` is installed,
