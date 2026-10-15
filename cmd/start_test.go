@@ -2,10 +2,11 @@ package cmd
 
 import (
 	"os"
-	"reflect"
 	"testing"
 
 	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestStartOverrides(t *testing.T) {
@@ -17,22 +18,14 @@ func TestStartOverrides(t *testing.T) {
 		for _, name := range names {
 			nodes = append(nodes, config.Node{Name: name})
 		}
-		if err := config.SaveSubscriptionNodes(id, nodes); err != nil {
-			t.Fatal(err)
-		}
+		require.NoError(t, config.SaveSubscriptionNodes(id, nodes))
 	}
 	initial := config.Config{Mode: "tun", SelectedSubscription: "selected", SelectedNode: "Only selected", Subscriptions: []config.SubscriptionItem{{ID: "first"}, {ID: "selected"}}}
-	if err := config.SaveConfig(&initial); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, config.SaveConfig(&initial))
 	path, err := config.GetConfigPath()
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	before, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	for _, tc := range []struct {
 		mode, node, wantSub, wantNode, wantMode string
 		wantErr                                 bool
@@ -46,19 +39,17 @@ func TestStartOverrides(t *testing.T) {
 		t.Run(tc.mode+"/"+tc.node, func(t *testing.T) {
 			cfg := initial
 			err := applyStartOverrides(&cfg, tc.mode, tc.node)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("unexpected error: %v", err)
+			if tc.wantErr {
+				require.Error(t, err)
+				return
 			}
-			if !tc.wantErr && (cfg.Mode != tc.wantMode || cfg.SelectedSubscription != tc.wantSub || cfg.SelectedNode != tc.wantNode) {
-				t.Fatalf("wrong overrides: %+v", cfg)
-			}
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantMode, cfg.Mode)
+			assert.Equal(t, tc.wantSub, cfg.SelectedSubscription)
+			assert.Equal(t, tc.wantNode, cfg.SelectedNode)
 		})
 	}
 	after, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !reflect.DeepEqual(before, after) {
-		t.Fatal("saved selection changed")
-	}
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }

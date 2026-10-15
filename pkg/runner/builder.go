@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net"
 	"sort"
 	"strings"
@@ -46,10 +47,10 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 		proxyServer = node.Server
 	}
 
-	var routeRules []map[string]interface{}
+	var routeRules []map[string]any
 
 	if mode == "tun" {
-		routeRules = append(routeRules, map[string]interface{}{
+		routeRules = append(routeRules, map[string]any{
 			"port":   []int{53},
 			"action": "hijack-dns",
 		})
@@ -62,7 +63,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 		if net.ParseIP(proxyServer).To4() == nil {
 			prefix = "/128"
 		}
-		routeRules = append(routeRules, map[string]interface{}{
+		routeRules = append(routeRules, map[string]any{
 			"ip_cidr":  []string{proxyServer + prefix},
 			"outbound": "direct",
 		})
@@ -71,30 +72,30 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			for _, ip := range ips {
 				if ipv4 := ip.To4(); ipv4 != nil {
 					proxyIP = ipv4.String()
-					routeRules = append(routeRules, map[string]interface{}{
+					routeRules = append(routeRules, map[string]any{
 						"ip_cidr":  []string{ipv4.String() + "/32"},
 						"outbound": "direct",
 					})
 				}
 			}
 		}
-		routeRules = append(routeRules, map[string]interface{}{
+		routeRules = append(routeRules, map[string]any{
 			"domain":   []string{proxyServer},
 			"outbound": "direct",
 		})
 	}
 
-	dnsRules := []map[string]interface{}{}
+	dnsRules := []map[string]any{}
 	if proxyServer != "" && net.ParseIP(proxyServer) == nil {
-		dnsRules = append(dnsRules, map[string]interface{}{
+		dnsRules = append(dnsRules, map[string]any{
 			"domain": []string{proxyServer},
 			"server": "dns-local",
 		})
 	}
 
-	baseConfig := map[string]interface{}{
-		"dns": map[string]interface{}{
-			"servers": []map[string]interface{}{
+	baseConfig := map[string]any{
+		"dns": map[string]any{
+			"servers": []map[string]any{
 				{"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
 				{"tag": "dns-local", "address": "local", "detour": "direct"},
 			},
@@ -102,7 +103,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			"final":    "dns-remote",
 			"strategy": "prefer_ipv4",
 		},
-		"route": map[string]interface{}{
+		"route": map[string]any{
 			"auto_detect_interface": true,
 			"final":                 "proxy",
 			"rules":                 routeRules,
@@ -111,7 +112,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 
 	// Inbounds
 	if mode == "tun" {
-		baseConfig["inbounds"] = []map[string]interface{}{
+		baseConfig["inbounds"] = []map[string]any{
 			{
 				"type":           "tun",
 				"tag":            "tun-in",
@@ -123,7 +124,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			},
 		}
 	} else {
-		baseConfig["inbounds"] = []map[string]interface{}{
+		baseConfig["inbounds"] = []map[string]any{
 			{
 				"type":        "mixed",
 				"tag":         "mixed-in",
@@ -134,7 +135,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 	}
 
 	// Build outbounds
-	var outbounds []map[string]interface{}
+	var outbounds []map[string]any
 
 	rawConfig := node.RawConfig
 	if len(rawConfig) == 0 && node.RawLink != "" {
@@ -152,7 +153,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			if len(xrayPort) > 0 && xrayPort[0] > 0 {
 				socksPort = xrayPort[0]
 			}
-			outbound := map[string]interface{}{
+			outbound := map[string]any{
 				"type":        "socks",
 				"tag":         "proxy",
 				"server":      "127.0.0.1",
@@ -162,10 +163,8 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			}
 			outbounds = append(outbounds, outbound)
 		} else {
-			rawCopy := make(map[string]interface{})
-			for k, v := range rawConfig {
-				rawCopy[k] = v
-			}
+			rawCopy := make(map[string]any)
+			maps.Copy(rawCopy, rawConfig)
 			if proxyIP != "" {
 				rawCopy["server"] = proxyIP
 			}
@@ -177,7 +176,7 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 		return opts, fmt.Errorf("node lacks raw_config and raw_link could not be parsed")
 	}
 
-	outbounds = append(outbounds, map[string]interface{}{"type": "direct", "tag": "direct"})
+	outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "direct"})
 	baseConfig["outbounds"] = outbounds
 
 	jsonBytes, err := json.MarshalIndent(baseConfig, "", "  ")
@@ -195,19 +194,15 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 }
 
 // convertToSingboxOutbound converts from Clash/subscription format to sing-box format
-func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, defaultServerName string) map[string]interface{} {
-	out := make(map[string]interface{})
+func convertToSingboxOutbound(raw map[string]any, protocolHint string, defaultServerName string) map[string]any {
+	out := make(map[string]any)
 	// Native sing-box outbounds already have the correct schema. Rebuilding them
 	// as Clash nodes loses nested TLS/transport and protocol-specific options.
 	if _, native := raw["server_port"]; native {
-		for k, v := range raw {
-			out[k] = v
-		}
-		if tls, ok := raw["tls"].(map[string]interface{}); ok && tls["server_name"] == nil && net.ParseIP(defaultServerName) == nil && defaultServerName != "" {
-			copyTLS := make(map[string]interface{}, len(tls)+1)
-			for k, v := range tls {
-				copyTLS[k] = v
-			}
+		maps.Copy(out, raw)
+		if tls, ok := raw["tls"].(map[string]any); ok && tls["server_name"] == nil && net.ParseIP(defaultServerName) == nil && defaultServerName != "" {
+			copyTLS := make(map[string]any, len(tls)+1)
+			maps.Copy(copyTLS, tls)
 			copyTLS["server_name"] = defaultServerName
 			out["tls"] = copyTLS
 		}
@@ -308,13 +303,14 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 				name = "obfs-local"
 			}
 			out["plugin"] = name
-			if opts, ok := raw["plugin-opts"].(map[string]interface{}); ok {
+			if opts, ok := raw["plugin-opts"].(map[string]any); ok {
 				var parts []string
 				for k, v := range opts {
 					if name == "obfs-local" {
-						if k == "mode" {
+						switch k {
+						case "mode":
 							k = "obfs"
-						} else if k == "host" {
+						case "host":
 							k = "obfs-host"
 						}
 					}
@@ -370,7 +366,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	networkType = strings.ToLower(networkType)
 
 	if networkType == "grpc" || typ == "grpc" || raw["grpc-opts"] != nil {
-		grpcMap := map[string]interface{}{
+		grpcMap := map[string]any{
 			"type": "grpc",
 		}
 		if sn, ok := raw["serviceName"].(string); ok && sn != "" {
@@ -378,7 +374,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		} else if sn, ok := raw["service_name"].(string); ok && sn != "" {
 			grpcMap["service_name"] = sn
 		}
-		if gOpts, ok := raw["grpc-opts"].(map[string]interface{}); ok {
+		if gOpts, ok := raw["grpc-opts"].(map[string]any); ok {
 			if sn, ok := gOpts["grpc-service-name"].(string); ok && sn != "" {
 				grpcMap["service_name"] = sn
 			} else if sn, ok := gOpts["serviceName"].(string); ok && sn != "" {
@@ -389,7 +385,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		}
 		out["transport"] = grpcMap
 	} else if networkType == "ws" || typ == "ws" || raw["ws-opts"] != nil {
-		wsMap := map[string]interface{}{
+		wsMap := map[string]any{
 			"type": "ws",
 		}
 		if p, ok := raw["path"].(string); ok && p != "" {
@@ -398,11 +394,11 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		if h, ok := raw["host"].(string); ok && h != "" {
 			wsMap["headers"] = map[string]string{"Host": h}
 		}
-		if wsOpts, ok := raw["ws-opts"].(map[string]interface{}); ok {
+		if wsOpts, ok := raw["ws-opts"].(map[string]any); ok {
 			if p, ok := wsOpts["path"].(string); ok && p != "" {
 				wsMap["path"] = p
 			}
-			if h, ok := wsOpts["headers"].(map[string]interface{}); ok && len(h) > 0 {
+			if h, ok := wsOpts["headers"].(map[string]any); ok && len(h) > 0 {
 				headersMap := make(map[string]string)
 				for hk, hv := range h {
 					if s, ok := hv.(string); ok {
@@ -424,7 +420,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		}
 		out["transport"] = wsMap
 	} else if networkType == "h2" || typ == "h2" || networkType == "http" || typ == "http" || raw["h2-opts"] != nil {
-		h2Map := map[string]interface{}{
+		h2Map := map[string]any{
 			"type": "http",
 		}
 		if p, ok := raw["path"].(string); ok && p != "" {
@@ -433,11 +429,11 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		if h, ok := raw["host"].(string); ok && h != "" {
 			h2Map["host"] = []string{h}
 		}
-		if h2Opts, ok := raw["h2-opts"].(map[string]interface{}); ok {
+		if h2Opts, ok := raw["h2-opts"].(map[string]any); ok {
 			if p, ok := h2Opts["path"].(string); ok && p != "" {
 				h2Map["path"] = p
 			}
-			if host, ok := h2Opts["host"].([]interface{}); ok && len(host) > 0 {
+			if host, ok := h2Opts["host"].([]any); ok && len(host) > 0 {
 				var hosts []string
 				for _, item := range host {
 					if s, ok := item.(string); ok {
@@ -449,7 +445,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		}
 		out["transport"] = h2Map
 	} else if networkType == "httpupgrade" || typ == "httpupgrade" {
-		httpUpgradeMap := map[string]interface{}{
+		httpUpgradeMap := map[string]any{
 			"type": "httpupgrade",
 		}
 		if p, ok := raw["path"].(string); ok && p != "" {
@@ -460,7 +456,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		}
 		out["transport"] = httpUpgradeMap
 	} else if networkType == "xhttp" || typ == "xhttp" || networkType == "splithttp" || typ == "splithttp" {
-		httpMap := map[string]interface{}{
+		httpMap := map[string]any{
 			"type": "http",
 		}
 		if p, ok := raw["path"].(string); ok && p != "" {
@@ -498,7 +494,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		}
 		if obfsType, ok := raw["obfs"].(string); ok && obfsType != "" && proto == "hysteria2" {
 			obfsPassword, _ := raw["obfs-password"].(string)
-			out["obfs"] = map[string]interface{}{
+			out["obfs"] = map[string]any{
 				"type":     obfsType,
 				"password": obfsPassword,
 			}
@@ -540,7 +536,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 
 	var realityPublicKey string
 	var realityShortID string
-	if realityOpts, ok := raw["reality-opts"].(map[string]interface{}); ok {
+	if realityOpts, ok := raw["reality-opts"].(map[string]any); ok {
 		if pk, ok := realityOpts["public-key"].(string); ok {
 			realityPublicKey = pk
 		}
@@ -556,7 +552,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	}
 
 	var alpnList []string
-	if alpn, ok := raw["alpn"].([]interface{}); ok {
+	if alpn, ok := raw["alpn"].([]any); ok {
 		for _, a := range alpn {
 			if s, ok := a.(string); ok && s != "" {
 				alpnList = append(alpnList, s)
@@ -565,7 +561,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	} else if alpn, ok := raw["alpn"].([]string); ok {
 		alpnList = alpn
 	} else if alpnStr, ok := raw["alpn"].(string); ok && alpnStr != "" {
-		for _, a := range strings.Split(alpnStr, ",") {
+		for a := range strings.SplitSeq(alpnStr, ",") {
 			a = strings.TrimSpace(a)
 			if a != "" {
 				alpnList = append(alpnList, a)
@@ -590,7 +586,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	}
 
 	if tlsEnabled || realityPublicKey != "" {
-		tlsBlock := map[string]interface{}{
+		tlsBlock := map[string]any{
 			"enabled": true,
 		}
 		if servername != "" {
@@ -603,13 +599,13 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 			tlsBlock["insecure"] = true
 		}
 		if fingerprint != "" && proto != "hysteria2" && proto != "hysteria" {
-			tlsBlock["utls"] = map[string]interface{}{
+			tlsBlock["utls"] = map[string]any{
 				"enabled":     true,
 				"fingerprint": fingerprint,
 			}
 		}
 		if realityPublicKey != "" {
-			tlsBlock["reality"] = map[string]interface{}{
+			tlsBlock["reality"] = map[string]any{
 				"enabled":    true,
 				"public_key": realityPublicKey,
 				"short_id":   realityShortID,
@@ -621,7 +617,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	return out
 }
 
-func truthy(v interface{}) bool {
+func truthy(v any) bool {
 	switch v := v.(type) {
 	case bool:
 		return v
@@ -630,19 +626,19 @@ func truthy(v interface{}) bool {
 	}
 	return false
 }
-func stringList(v interface{}) []string {
+func stringList(v any) []string {
 	var result []string
 	switch v := v.(type) {
 	case []string:
 		return v
-	case []interface{}:
+	case []any:
 		for _, item := range v {
 			if s, ok := item.(string); ok && s != "" {
 				result = append(result, s)
 			}
 		}
 	case string:
-		for _, item := range strings.Split(v, ",") {
+		for item := range strings.SplitSeq(v, ",") {
 			if s := strings.TrimSpace(item); s != "" {
 				result = append(result, s)
 			}

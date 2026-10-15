@@ -39,7 +39,7 @@ var updateCmd = &cobra.Command{
 		}
 
 		target := args[0]
-		var foundIdx int = -1
+		var foundIdx = -1
 
 		// 1. Check exact ID match
 		for i, item := range cfg.Subscriptions {

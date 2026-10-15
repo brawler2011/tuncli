@@ -17,12 +17,12 @@ import (
 )
 
 type Node struct {
-	Name      string                 `json:"name"`
-	Protocol  string                 `json:"protocol"`
-	Server    string                 `json:"server"`
-	Port      int                    `json:"port"`
-	RawLink   string                 `json:"raw_link"`
-	RawConfig map[string]interface{} `json:"raw_config"`
+	Name      string         `json:"name"`
+	Protocol  string         `json:"protocol"`
+	Server    string         `json:"server"`
+	Port      int            `json:"port"`
+	RawLink   string         `json:"raw_link"`
+	RawConfig map[string]any `json:"raw_config"`
 }
 
 func LoadOrCreateHWID() (string, error) {
@@ -50,16 +50,14 @@ func LoadOrCreateHWID() (string, error) {
 	if data, err := os.ReadFile(v2rayHwidPath); err == nil {
 		hwid := strings.TrimSpace(string(data))
 		if hwid != "" {
-			os.WriteFile(hwidPath, []byte(hwid), 0644)
-			return hwid, nil
+			return hwid, os.WriteFile(hwidPath, []byte(hwid), 0644)
 		}
 	}
 
 	// Generate UUID v4 format (matching subscription server expectations)
 	hwid := generateUUID()
 
-	os.WriteFile(hwidPath, []byte(hwid), 0644)
-	return hwid, nil
+	return hwid, os.WriteFile(hwidPath, []byte(hwid), 0644)
 }
 
 func generateUUID() string {
@@ -92,7 +90,7 @@ func FetchAndParse(subURL string) ([]Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("server returned status: %d %s", resp.StatusCode, resp.Status)
@@ -145,11 +143,11 @@ func ImportFromV2RayTun() ([]Node, error) {
 
 	var subs []struct {
 		Nodes []struct {
-			Name      string                 `json:"name"`
-			Protocol  string                 `json:"protocol"`
-			Address   string                 `json:"address"`
-			Port      int                    `json:"port"`
-			RawConfig map[string]interface{} `json:"raw_config"`
+			Name      string         `json:"name"`
+			Protocol  string         `json:"protocol"`
+			Address   string         `json:"address"`
+			Port      int            `json:"port"`
+			RawConfig map[string]any `json:"raw_config"`
 		} `json:"nodes"`
 	}
 	err = json.Unmarshal(data, &subs)
@@ -215,7 +213,7 @@ func decodeBase64Flexible(s string) ([]byte, error) {
 
 func parseClashYAML(body string) ([]Node, error) {
 	var yamlData struct {
-		Proxies []map[string]interface{} `yaml:"proxies"`
+		Proxies []map[string]any `yaml:"proxies"`
 	}
 
 	err := yaml.Unmarshal([]byte(body), &yamlData)
@@ -252,7 +250,7 @@ func parseClashYAML(body string) ([]Node, error) {
 
 func parseSingboxJSON(body string) ([]Node, error) {
 	var jsonData struct {
-		Outbounds []map[string]interface{} `json:"outbounds"`
+		Outbounds []map[string]any `json:"outbounds"`
 	}
 
 	err := json.Unmarshal([]byte(body), &jsonData)
@@ -358,10 +356,10 @@ func parseSingleURI(link string) (Node, error) {
 	server := u.Hostname()
 	port := 443
 	if p := u.Port(); p != "" {
-		fmt.Sscanf(p, "%d", &port)
+		_, _ = fmt.Sscanf(p, "%d", &port) // Keep the default if the optional number is invalid.
 	}
 
-	rawConfig := make(map[string]interface{})
+	rawConfig := make(map[string]any)
 	rawConfig["name"] = name
 	rawConfig["type"] = protocol
 	rawConfig["server"] = server
@@ -411,7 +409,7 @@ func parseSingleURI(link string) (Node, error) {
 	}
 
 	if pbk := q.Get("pbk"); pbk != "" {
-		rawConfig["reality-opts"] = map[string]interface{}{
+		rawConfig["reality-opts"] = map[string]any{
 			"public-key": pbk,
 			"short-id":   q.Get("sid"),
 		}
@@ -466,7 +464,7 @@ func parseVMessURI(link string) (Node, error) {
 		return Node{}, fmt.Errorf("failed to decode vmess base64: %w", err)
 	}
 
-	var vmessData map[string]interface{}
+	var vmessData map[string]any
 	if err := json.Unmarshal(dec, &vmessData); err != nil {
 		return Node{}, fmt.Errorf("failed to parse vmess json: %w", err)
 	}
@@ -481,10 +479,10 @@ func parseVMessURI(link string) (Node, error) {
 	if p, ok := vmessData["port"].(float64); ok {
 		port = int(p)
 	} else if pStr, ok := vmessData["port"].(string); ok {
-		fmt.Sscanf(pStr, "%d", &port)
+		_, _ = fmt.Sscanf(pStr, "%d", &port) // Keep the default if the optional number is invalid.
 	}
 
-	rawConfig := make(map[string]interface{})
+	rawConfig := make(map[string]any)
 	rawConfig["name"] = name
 	rawConfig["type"] = "vmess"
 	rawConfig["server"] = server
@@ -497,7 +495,7 @@ func parseVMessURI(link string) (Node, error) {
 		rawConfig["alterId"] = int(aid)
 	} else if aidStr, ok := vmessData["aid"].(string); ok {
 		var aid int
-		fmt.Sscanf(aidStr, "%d", &aid)
+		_, _ = fmt.Sscanf(aidStr, "%d", &aid) // Keep the default if the optional number is invalid.
 		rawConfig["alterId"] = aid
 	}
 	if scy, ok := vmessData["scy"].(string); ok && scy != "" {
@@ -567,7 +565,7 @@ func parseShadowsocksURI(link string) (Node, error) {
 	}
 
 	var method, password, server string
-	var port int = 8388
+	var port = 8388
 
 	if strings.Contains(withoutScheme, "@") {
 		at := strings.LastIndex(withoutScheme, "@")
@@ -587,23 +585,23 @@ func parseShadowsocksURI(link string) (Node, error) {
 
 		if hp, p, err := net.SplitHostPort(hostPort); err == nil {
 			server = hp
-			fmt.Sscanf(p, "%d", &port)
+			_, _ = fmt.Sscanf(p, "%d", &port) // Keep the default if the optional number is invalid.
 		} else {
 			server = hostPort
 		}
 	} else {
 		if dec, err := decodeBase64Flexible(withoutScheme); err == nil {
 			decodedStr := string(dec)
-			if idx := strings.Index(decodedStr, "@"); idx != -1 {
-				userPart := decodedStr[:idx]
-				hostPart := decodedStr[idx+1:]
-				if colon := strings.Index(userPart, ":"); colon != -1 {
-					method = userPart[:colon]
-					password = userPart[colon+1:]
+			if before, after, ok := strings.Cut(decodedStr, "@"); ok {
+				userPart := before
+				hostPart := after
+				if before, after, ok := strings.Cut(userPart, ":"); ok {
+					method = before
+					password = after
 				}
 				if hp, p, err := net.SplitHostPort(hostPart); err == nil {
 					server = hp
-					fmt.Sscanf(p, "%d", &port)
+					_, _ = fmt.Sscanf(p, "%d", &port) // Keep the default if the optional number is invalid.
 				} else {
 					server = hostPart
 				}
@@ -615,7 +613,7 @@ func parseShadowsocksURI(link string) (Node, error) {
 		return Node{}, fmt.Errorf("failed to parse shadowsocks URI: server not found")
 	}
 
-	rawConfig := map[string]interface{}{
+	rawConfig := map[string]any{
 		"name":     name,
 		"type":     "shadowsocks",
 		"server":   server,

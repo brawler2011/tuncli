@@ -7,12 +7,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsXHTTP(t *testing.T) {
@@ -31,7 +32,7 @@ func TestIsXHTTP(t *testing.T) {
 		{
 			name: "SplitHTTP raw config",
 			node: &config.Node{
-				RawConfig: map[string]interface{}{
+				RawConfig: map[string]any{
 					"type":    "vless",
 					"network": "splithttp",
 				},
@@ -41,7 +42,7 @@ func TestIsXHTTP(t *testing.T) {
 		{
 			name: "VLESS gRPC node",
 			node: &config.Node{
-				RawConfig: map[string]interface{}{
+				RawConfig: map[string]any{
 					"type":    "vless",
 					"network": "grpc",
 				},
@@ -59,7 +60,7 @@ func TestIsXHTTP(t *testing.T) {
 			name: "Hysteria2 node",
 			node: &config.Node{
 				Protocol: "hysteria2",
-				RawConfig: map[string]interface{}{
+				RawConfig: map[string]any{
 					"type": "hysteria2",
 				},
 			},
@@ -69,9 +70,8 @@ func TestIsXHTTP(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := IsXHTTP(tt.node); got != tt.expected {
-				t.Errorf("IsXHTTP() = %v, want %v", got, tt.expected)
-			}
+			got := IsXHTTP(tt.node)
+			assert.Equal(t, tt.expected, got)
 		})
 	}
 }
@@ -86,114 +86,63 @@ func TestGenerateXrayConfig(t *testing.T) {
 	}
 
 	configBytes, err := GenerateXrayConfig(node, 10815)
-	if err != nil {
-		t.Fatalf("GenerateXrayConfig failed: %v", err)
-	}
+	require.NoError(t, err)
 
-	var parsed map[string]interface{}
-	if err := json.Unmarshal(configBytes, &parsed); err != nil {
-		t.Fatalf("failed to unmarshal generated json: %v", err)
-	}
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(configBytes, &parsed))
 
 	// 1. Verify Inbound
-	inbounds, ok := parsed["inbounds"].([]interface{})
-	if !ok || len(inbounds) == 0 {
-		t.Fatal("inbounds missing or empty")
-	}
-	inbound := inbounds[0].(map[string]interface{})
-	if inbound["protocol"] != "socks" {
-		t.Errorf("expected inbound protocol 'socks', got %v", inbound["protocol"])
-	}
-	if inbound["listen"] != "127.0.0.1" {
-		t.Errorf("expected inbound listen '127.0.0.1', got %v", inbound["listen"])
-	}
-	if int(inbound["port"].(float64)) != 10815 {
-		t.Errorf("expected inbound port 10815, got %v", inbound["port"])
-	}
+	inbounds, ok := parsed["inbounds"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, inbounds)
+	inbound := inbounds[0].(map[string]any)
+	assert.Equal(t, "socks", inbound["protocol"])
+	assert.Equal(t, "127.0.0.1", inbound["listen"])
+	assert.Equal(t, 10815, int(inbound["port"].(float64)))
 
 	// 2. Verify Outbound
-	outbounds, ok := parsed["outbounds"].([]interface{})
-	if !ok || len(outbounds) == 0 {
-		t.Fatal("outbounds missing or empty")
-	}
-	outbound := outbounds[0].(map[string]interface{})
-	if outbound["protocol"] != "vless" {
-		t.Errorf("expected outbound protocol 'vless', got %v", outbound["protocol"])
-	}
+	outbounds, ok := parsed["outbounds"].([]any)
+	require.True(t, ok)
+	require.NotEmpty(t, outbounds)
+	outbound := outbounds[0].(map[string]any)
+	assert.Equal(t, "vless", outbound["protocol"])
 
-	streamSettings, ok := outbound["streamSettings"].(map[string]interface{})
-	if !ok {
-		t.Fatal("streamSettings missing")
-	}
+	streamSettings, ok := outbound["streamSettings"].(map[string]any)
+	require.True(t, ok)
 
-	if streamSettings["network"] != "xhttp" {
-		t.Errorf("expected network 'xhttp', got %v", streamSettings["network"])
-	}
-	if streamSettings["security"] != "reality" {
-		t.Errorf("expected security 'reality', got %v", streamSettings["security"])
-	}
+	assert.Equal(t, "xhttp", streamSettings["network"])
+	assert.Equal(t, "reality", streamSettings["security"])
 
 	// Check sockopt mark 354
-	sockopt, ok := streamSettings["sockopt"].(map[string]interface{})
-	if !ok {
-		t.Fatal("sockopt missing")
-	}
-	if int(sockopt["mark"].(float64)) != 354 {
-		t.Errorf("expected mark 354, got %v", sockopt["mark"])
-	}
+	sockopt, ok := streamSettings["sockopt"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, 354, int(sockopt["mark"].(float64)))
 
 	// Check realitySettings
-	reality, ok := streamSettings["realitySettings"].(map[string]interface{})
-	if !ok {
-		t.Fatal("realitySettings missing")
-	}
-	if reality["serverName"] != "example.com" {
-		t.Errorf("expected serverName 'example.com', got %v", reality["serverName"])
-	}
-	if reality["publicKey"] != "g7Wb2K_GoNt6WmY9Z4H9-aILg92xBDrw36KwCezc5Sg" {
-		t.Errorf("expected publicKey, got %v", reality["publicKey"])
-	}
+	reality, ok := streamSettings["realitySettings"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "example.com", reality["serverName"])
+	assert.Equal(t, "g7Wb2K_GoNt6WmY9Z4H9-aILg92xBDrw36KwCezc5Sg", reality["publicKey"])
 
 	// Check xhttpSettings
-	xhttp, ok := streamSettings["xhttpSettings"].(map[string]interface{})
-	if !ok {
-		t.Fatal("xhttpSettings missing")
-	}
-	if xhttp["path"] != "/xhttp" {
-		t.Errorf("expected path '/xhttp', got %v", xhttp["path"])
-	}
-	if xhttp["mode"] != "stream-one" {
-		t.Errorf("expected mode 'stream-one', got %v", xhttp["mode"])
-	}
-	if xhttp["host"] != "example.com" {
-		t.Errorf("expected host 'example.com', got %v", xhttp["host"])
-	}
+	xhttp, ok := streamSettings["xhttpSettings"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "/xhttp", xhttp["path"])
+	assert.Equal(t, "stream-one", xhttp["mode"])
+	assert.Equal(t, "example.com", xhttp["host"])
 
-	headers, ok := xhttp["headers"].(map[string]interface{})
-	if !ok {
-		t.Fatal("headers missing")
-	}
-	if headers["x-test-header"] != "warp" {
-		t.Errorf("expected x-test-header 'warp', got %v", headers["x-test-header"])
-	}
-	if headers["x-test-priority"] != "0" {
-		t.Errorf("expected x-test-priority '0', got %v", headers["x-test-priority"])
-	}
+	headers, ok := xhttp["headers"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "warp", headers["x-test-header"])
+	assert.Equal(t, "0", headers["x-test-priority"])
 
 	// If xray binary is installed, validate config with `xray run -test -c`
-	if xrayPath, err := exec.LookPath("xray"); err == nil || xrayPath != "" {
-		tmpFile, err := os.CreateTemp("", "xray-test-*.json")
-		if err == nil {
-			defer os.Remove(tmpFile.Name())
-			tmpFile.Write(configBytes)
-			tmpFile.Close()
-
-			cmd := exec.Command(xrayPath, "run", "-test", "-c", tmpFile.Name())
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				t.Fatalf("xray validation failed: %v\nOutput:\n%s", err, string(out))
-			}
-		}
+	if xrayPath, err := exec.LookPath("xray"); err == nil {
+		path := filepath.Join(t.TempDir(), "xray.json")
+		require.NoError(t, os.WriteFile(path, configBytes, 0600))
+		cmd := exec.Command(xrayPath, "run", "-test", "-c", path)
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, "xray validation output: %s", out)
 	}
 }
 
@@ -211,7 +160,7 @@ func TestXrayProcessHelper(t *testing.T) {
 		return
 	}
 	if mode == "exit" {
-		os.Stderr.WriteString("synthetic xray failure\n")
+		_, _ = os.Stderr.WriteString("synthetic xray failure\n")
 		os.Exit(7)
 	}
 	if mode == "timeout" {
@@ -240,14 +189,15 @@ func TestXrayProcessHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(4)
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
 			os.Exit(5)
 		}
-		conn.Close()
-		os.Stdout.WriteString("test connection\n")
+		require.NoError(t, conn.Close())
+		_, err = os.Stdout.WriteString("test connection\n")
+		require.NoError(t, err)
 	}
 }
 
@@ -258,44 +208,34 @@ func fakeXray(t *testing.T, mode string) string {
 	dir := t.TempDir()
 	t.Setenv("TMPDIR", dir)
 	path := filepath.Join(dir, "xray")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec \"$TUNCLI_TEST_BINARY\" -test.run=^TestXrayProcessHelper$ -- \"$@\"\n"), 0700); err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\nexec \"$TUNCLI_TEST_BINARY\" -test.run=^TestXrayProcessHelper$ -- \"$@\"\n"), 0700))
 	return path
 }
 
 func xrayTestNode() *config.Node {
-	return &config.Node{Protocol: "vless", Server: "192.0.2.1", Port: 443, RawConfig: map[string]interface{}{"type": "vless", "network": "xhttp", "uuid": "00000000-0000-4000-8000-000000000001"}}
+	return &config.Node{Protocol: "vless", Server: "192.0.2.1", Port: 443, RawConfig: map[string]any{"type": "vless", "network": "xhttp", "uuid": "00000000-0000-4000-8000-000000000001"}}
 }
 
 func TestXrayLifecycleAndRepeatedStop(t *testing.T) {
 	path := fakeXray(t, "serve")
 	sidecar, err := startXraySidecar(xrayTestNode(), 0, path, false)
-	if err != nil {
-		t.Fatal(err)
-	}
+	require.NoError(t, err)
 	cleaned := 0
 	sidecar.cleanupRule = func() { cleaned++ }
 	var wg sync.WaitGroup
 	for range 3 {
 		wg.Go(func() {
-			if err := sidecar.Stop(); err != nil {
-				t.Errorf("Stop: %v", err)
-			}
+			assert.NoError(t, sidecar.Stop())
 		})
 	}
 	wg.Wait()
-	if cleaned != 1 {
-		t.Fatalf("cleanup called %d times", cleaned)
-	}
+	require.Equal(t, 1, cleaned)
 	select {
 	case <-sidecar.done:
 	default:
 		t.Fatal("child not reaped")
 	}
-	if _, err := os.Stat(sidecar.ConfigFile); !os.IsNotExist(err) {
-		t.Fatalf("temporary config remains: %v", err)
-	}
+	assert.NoFileExists(t, sidecar.ConfigFile)
 }
 
 func TestXrayStartupFailureCleansConfig(t *testing.T) {
@@ -303,44 +243,33 @@ func TestXrayStartupFailureCleansConfig(t *testing.T) {
 		t.Run(mode, func(t *testing.T) {
 			path := fakeXray(t, mode)
 			_, err := startXraySidecar(xrayTestNode(), 0, path, false)
-			if err == nil {
-				t.Fatal("startup succeeded")
-			}
-			if mode == "exit" && !strings.Contains(err.Error(), "synthetic xray failure") {
-				t.Fatalf("diagnostic lost: %v", err)
+			require.Error(t, err)
+			if mode == "exit" {
+				require.ErrorContains(t, err, "synthetic xray failure")
 			}
 			matches, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "tuncli-xray-*.json"))
-			if err != nil || len(matches) != 0 {
-				t.Fatalf("config leak: %v, %v", matches, err)
-			}
+			require.NoError(t, err)
+			require.Empty(t, matches)
 		})
 	}
 }
 
 func TestGenerateXrayConfigTLSOptionsAndDefaultPath(t *testing.T) {
-	for _, alpn := range []interface{}{"h2,http/1.1", []interface{}{"h2", "http/1.1"}, []string{"h2", "http/1.1"}} {
+	for _, alpn := range []any{"h2,http/1.1", []any{"h2", "http/1.1"}, []string{"h2", "http/1.1"}} {
 		node := xrayTestNode()
 		node.RawConfig["security"] = "tls"
 		node.RawConfig["alpn"] = alpn
 		node.RawConfig["insecure"] = "1"
 		data, err := GenerateXrayConfig(node, 10815, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var cfg map[string]interface{}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			t.Fatal(err)
-		}
-		stream := cfg["outbounds"].([]interface{})[0].(map[string]interface{})["streamSettings"].(map[string]interface{})
-		tls := stream["tlsSettings"].(map[string]interface{})
-		if tls["allowInsecure"] != true || len(tls["alpn"].([]interface{})) != 2 {
-			t.Fatalf("TLS options lost: %v", tls)
-		}
-		if stream["xhttpSettings"].(map[string]interface{})["path"] != "/" {
-			t.Fatal("wrong default path")
-		}
-		if _, ok := stream["sockopt"]; ok {
-			t.Fatal("proxy mode needs no privileged socket options")
-		}
+		require.NoError(t, err)
+		var cfg map[string]any
+		require.NoError(t, json.Unmarshal(data, &cfg))
+		stream := cfg["outbounds"].([]any)[0].(map[string]any)["streamSettings"].(map[string]any)
+		tls := stream["tlsSettings"].(map[string]any)
+		require.Equal(t, true, tls["allowInsecure"])
+		require.Len(t, tls["alpn"].([]any), 2)
+		require.Equal(t, "/", stream["xhttpSettings"].(map[string]any)["path"])
+		_, ok := stream["sockopt"]
+		require.False(t, ok)
 	}
 }

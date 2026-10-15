@@ -23,7 +23,7 @@ func Start(cfg *config.Config) (runErr error) {
 		return fmt.Errorf("invalid mode %q", cfg.Mode)
 	}
 	if cfg.SelectedSubscription == "" || cfg.SelectedNode == "" {
-		return fmt.Errorf("no valid node selected. Run 'tuncli select' first.")
+		return fmt.Errorf("no valid node selected. Run 'tuncli select' first")
 	}
 
 	nodes, err := config.LoadSubscriptionNodes(cfg.SelectedSubscription)
@@ -42,7 +42,7 @@ func Start(cfg *config.Config) (runErr error) {
 	}
 
 	if !found {
-		return fmt.Errorf("selected node %q not found in subscription %q. Please run 'tuncli select' again.", cfg.SelectedNode, cfg.SelectedSubscription)
+		return fmt.Errorf("selected node %q not found in subscription %q. Please run 'tuncli select' again", cfg.SelectedNode, cfg.SelectedSubscription)
 	}
 
 	release, err := acquireProcessFile(processDir())
@@ -112,6 +112,6 @@ func Start(cfg *config.Config) (runErr error) {
 		fmt.Println("\nStopping VPN...")
 		return nil
 	case <-xrayDone:
-		return fmt.Errorf("Xray sidecar exited unexpectedly: %v", sidecar.waitErr)
+		return fmt.Errorf("xray sidecar exited unexpectedly: %w", sidecar.waitErr)
 	}
 }

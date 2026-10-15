@@ -27,12 +27,12 @@ type Config struct {
 }
 
 type Node struct {
-	Name      string                 `json:"name"`
-	Protocol  string                 `json:"protocol"`
-	Server    string                 `json:"server"`
-	Port      int                    `json:"port"`
-	RawLink   string                 `json:"raw_link"`   // For URI lists
-	RawConfig map[string]interface{} `json:"raw_config"` // For YAML/JSON formats
+	Name      string         `json:"name"`
+	Protocol  string         `json:"protocol"`
+	Server    string         `json:"server"`
+	Port      int            `json:"port"`
+	RawLink   string         `json:"raw_link"`   // For URI lists
+	RawConfig map[string]any `json:"raw_config"` // For YAML/JSON formats
 }
 
 func GetConfigDir() (string, error) {

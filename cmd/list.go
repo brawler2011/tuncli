@@ -19,12 +19,14 @@ var listCmd = &cobra.Command{
 		}
 
 		if len(cfg.Subscriptions) == 0 {
-			fmt.Fprintln(cmd.OutOrStdout(), "No subscriptions or servers added yet. Run 'tuncli add <link>' to add one.")
-			return nil
+			_, err := fmt.Fprintln(cmd.OutOrStdout(), "No subscriptions or servers added yet. Run 'tuncli add <link>' to add one.")
+			return err
 		}
 
 		w := tabwriter.NewWriter(cmd.OutOrStdout(), 0, 0, 3, ' ', 0)
-		fmt.Fprintln(w, "ID\tNAME\tTYPE\tNODES\tURL/LINK")
+		if _, err := fmt.Fprintln(w, "ID\tNAME\tTYPE\tNODES\tURL/LINK"); err != nil {
+			return err
+		}
 
 		for _, item := range cfg.Subscriptions {
 			nodes, err := config.LoadSubscriptionNodes(item.ID)
@@ -38,11 +40,11 @@ var listCmd = &cobra.Command{
 				urlStr = urlStr[:57] + "..."
 			}
 
-			fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", item.ID, item.Name, item.Type, nodeCount, urlStr)
+			if _, err := fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\n", item.ID, item.Name, item.Type, nodeCount, urlStr); err != nil {
+				return err
+			}
 		}
-		w.Flush()
-
-		return nil
+		return w.Flush()
 	},
 }
 

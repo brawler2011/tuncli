@@ -21,7 +21,7 @@ var removeCmd = &cobra.Command{
 			return err
 		}
 
-		var foundIdx int = -1
+		var foundIdx = -1
 
 		// 1. Check exact ID match
 		for i, item := range cfg.Subscriptions {
@@ -52,7 +52,7 @@ var removeCmd = &cobra.Command{
 		}
 
 		if foundIdx == -1 {
-			return fmt.Errorf("no subscription or server matching %q found. Run 'tuncli list' to see active items.", target)
+			return fmt.Errorf("no subscription or server matching %q found. Run 'tuncli list' to see active items", target)
 		}
 
 		removedItem := cfg.Subscriptions[foundIdx]

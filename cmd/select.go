@@ -19,7 +19,7 @@ var selectCmd = &cobra.Command{
 		}
 
 		if len(cfg.Subscriptions) == 0 {
-			return fmt.Errorf("no subscriptions or servers added yet. Please run 'tuncli add <link>' first.")
+			return fmt.Errorf("no subscriptions or servers added yet. Please run 'tuncli add <link>' first")
 		}
 
 		// 1. Select Mode
@@ -61,7 +61,7 @@ var selectCmd = &cobra.Command{
 		}
 
 		if len(nodeNames) == 0 {
-			return fmt.Errorf("no nodes available. Please run 'tuncli update' first.")
+			return fmt.Errorf("no nodes available. Please run 'tuncli update' first")
 		}
 
 		nodePrompt := &survey.Select{

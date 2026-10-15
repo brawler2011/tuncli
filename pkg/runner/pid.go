@@ -35,7 +35,7 @@ func openProcessFile(dir string, create bool) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dfd)
+	defer func() { _ = unix.Close(dfd) }()
 	var st unix.Stat_t
 	if err := unix.Fstat(dfd, &st); err != nil {
 		return nil, err
@@ -53,11 +53,11 @@ func openProcessFile(dir string, create bool) (*os.File, error) {
 	}
 	f := os.NewFile(uintptr(fd), filepath.Join(dir, "tuncli.pid"))
 	if err := unix.Fstat(fd, &st); err != nil {
-		f.Close()
+		_ = f.Close()
 		return nil, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) || st.Mode&0777 != 0600 || st.Nlink != 1 {
-		f.Close()
+		_ = f.Close()
 		return nil, fmt.Errorf("unsafe PID file")
 	}
 	return f, nil
@@ -85,7 +85,7 @@ func acquireProcessFile(dir string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	fail := func(err error) (func(), error) { f.Close(); return nil, err }
+	fail := func(err error) (func(), error) { _ = f.Close(); return nil, err }
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return fail(fmt.Errorf("another tuncli instance is running: %w", err))
 	}
@@ -122,7 +122,7 @@ func verifiedProcess(info ProcessInfo) (int, error) {
 	if err != nil {
 		return -1, err
 	}
-	fail := func(err error) (int, error) { unix.Close(fd); return -1, err }
+	fail := func(err error) (int, error) { _ = unix.Close(fd); return -1, err }
 	start, err := processStartTime(info.TuncliPID)
 	if err != nil {
 		return fail(err)
@@ -149,7 +149,7 @@ func stopProcessFile(dir string) error {
 	if err != nil {
 		return fmt.Errorf("cannot open tuncli runtime state (use the same user/sudo as start): %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	// An unlocked file is stale. Never signal a PID from such a file.
 	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
 		return fmt.Errorf("tuncli is not currently running")
@@ -168,7 +168,7 @@ func stopProcessFile(dir string) error {
 	if err != nil {
 		return fmt.Errorf("refusing to signal an unverified process: %w", err)
 	}
-	defer unix.Close(fd)
+	defer func() { _ = unix.Close(fd) }()
 	if err := unix.PidfdSendSignal(fd, syscall.SIGTERM, nil, 0); err != nil {
 		return fmt.Errorf("stop tuncli: %w", err)
 	}
