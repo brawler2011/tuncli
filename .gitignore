@@ -11,14 +11,21 @@
 # Output of the go coverage tool
 *.out
 *.prof
+/coverage/
+/coverage.html
 
 # Go workspace file
 go.work
 go.work.sum
 
 # Project specific binaries and build directories
-tuncli
+/tuncli
 /build/
+/dist/
+
+# Temporary files
+*.tmp
+*~
 
 # IDEs and editors
 .idea/
@@ -32,6 +39,7 @@ tuncli
 # Local environment files
 .env
 .env.*
+!.env.example
 
 # OS files
 .DS_Store
