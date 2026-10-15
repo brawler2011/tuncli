@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -14,7 +15,13 @@ import (
 	"github.com/sagernet/sing/service"
 )
 
-func Start(cfg *config.Config) error {
+func Start(cfg *config.Config) (runErr error) {
+	if cfg == nil {
+		return fmt.Errorf("config is nil")
+	}
+	if cfg.Mode != "tun" && cfg.Mode != "proxy" {
+		return fmt.Errorf("invalid mode %q", cfg.Mode)
+	}
 	if cfg.SelectedSubscription == "" || cfg.SelectedNode == "" {
 		return fmt.Errorf("no valid node selected. Run 'tuncli select' first.")
 	}
@@ -38,7 +45,33 @@ func Start(cfg *config.Config) error {
 		return fmt.Errorf("selected node %q not found in subscription %q. Please run 'tuncli select' again.", cfg.SelectedNode, cfg.SelectedSubscription)
 	}
 
+	release, err := acquireProcessFile(processDir())
+	if err != nil {
+		return fmt.Errorf("cannot acquire runtime state: %w", err)
+	}
+	defer release()
+	osSignals := make(chan os.Signal, 1)
+	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(osSignals)
+
 	fmt.Printf("Starting VPN with node: %s [%s]\n", node.Name, cfg.Mode)
+
+	var sidecar *XraySidecar
+	var xrayPort int
+	if IsXHTTP(&node) {
+		fmt.Println("Node uses XHTTP transport. Launching Xray sidecar...")
+		var err error
+		sidecar, err = StartXraySidecar(&node, DefaultXrayPort, cfg.Mode)
+		if err != nil {
+			return fmt.Errorf("failed to start Xray sidecar: %w", err)
+		}
+		defer func() {
+			fmt.Println("Stopping Xray sidecar...")
+			runErr = errors.Join(runErr, sidecar.Stop())
+		}()
+		xrayPort = sidecar.Port
+		fmt.Printf("Xray sidecar running on 127.0.0.1:%d\n", xrayPort)
+	}
 
 	ctx := context.Background()
 	logger := log.NewDefaultFactory(ctx, log.Formatter{
@@ -47,7 +80,7 @@ func Start(cfg *config.Config) error {
 	ctx = service.ContextWith(ctx, logger)
 	ctx = singboxContext(ctx)
 
-	options, err := BuildSingboxConfig(ctx, &node, cfg.Mode)
+	options, err := BuildSingboxConfig(ctx, &node, cfg.Mode, xrayPort)
 	if err != nil {
 		return fmt.Errorf("failed to build sing-box config: %w", err)
 	}
@@ -63,21 +96,22 @@ func Start(cfg *config.Config) error {
 		return fmt.Errorf("failed to initialize sing-box: %w", err)
 	}
 
+	defer func() { runErr = errors.Join(runErr, instance.Close()) }()
 	err = instance.Start()
 	if err != nil {
 		return fmt.Errorf("failed to start sing-box: %w", err)
 	}
 	fmt.Println("VPN is running. Press Ctrl+C to stop.")
 
-	osSignals := make(chan os.Signal, 1)
-	signal.Notify(osSignals, os.Interrupt, syscall.SIGTERM)
-	<-osSignals
-
-	fmt.Println("\nStopping VPN...")
-	err = instance.Close()
-	if err != nil {
-		return fmt.Errorf("error during shutdown: %w", err)
+	var xrayDone <-chan struct{}
+	if sidecar != nil {
+		xrayDone = sidecar.done
 	}
-
-	return nil
+	select {
+	case <-osSignals:
+		fmt.Println("\nStopping VPN...")
+		return nil
+	case <-xrayDone:
+		return fmt.Errorf("Xray sidecar exited unexpectedly: %v", sidecar.waitErr)
+	}
 }

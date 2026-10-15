@@ -47,7 +47,8 @@ make clean      # Remove build/ and dist/
 Builds, tests, and vet share the feature tags in the Makefile. CI runs the same
 checks and build for pushes and pull requests; tagged releases run checks before
 packaging and publishing. Release builds disable CGO and require tar.
-Tests do not require root or an active VPN connection.
+Tests do not require root or an active VPN connection. If `xray` is installed,
+the runner tests also validate generated Xray configuration with it.
 
 Override `GO`, `BUILD_DIR`, or `DIST_DIR` when needed, for example
 `make build GO=/path/to/go BUILD_DIR=build/debug`. `make clean` only accepts
@@ -87,6 +88,32 @@ Start the connection:
 ```bash
 sudo tuncli start
 ```
+
+For a single launch, override the mode or select a node by its exact name:
+
+```bash
+tuncli start --mode proxy --node "My node"
+```
+
+These flags do not change the saved selection. If names repeat, the selected
+subscription is searched first, then the other subscriptions in saved order.
+Proxy mode listens on `127.0.0.1:2080` (HTTP and SOCKS).
+
+Stop the connection from another terminal using the same user and privilege
+level as `start`:
+
+```bash
+sudo tuncli stop  # For a connection started with sudo
+# tuncli stop     # For a connection started as a regular user
+```
+
+Only one instance per effective user can run at a time. Runtime state is locked
+in `/tmp/tuncli-<effective-uid>/` with private permissions. Stopping requires
+Linux pidfd support (kernel 5.3 or newer); Ctrl+C also stops the foreground process.
+
+XHTTP and SplitHTTP nodes require an external `xray` executable, installed at
+`/usr/bin/xray` or available in `PATH`. Other transports use the embedded sing-box
+engine. Xray starts and stops with the VPN; it is not bundled in release archives.
 
 > [!IMPORTANT]
 > Running in **TUN** mode requires root privileges (`sudo`) to configure the virtual network interface. **Proxy** mode can be run as a regular user.
