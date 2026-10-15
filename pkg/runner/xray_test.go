@@ -2,9 +2,15 @@ package runner
 
 import (
 	"encoding/json"
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/brawler2011/tuncli/pkg/config"
 )
@@ -196,5 +202,145 @@ func TestGetDefaultInterface(t *testing.T) {
 	// On machines with active network, iface should be detected
 	if iface != "" {
 		t.Logf("Detected default interface: %s", iface)
+	}
+}
+
+func TestXrayProcessHelper(t *testing.T) {
+	mode := os.Getenv("TUNCLI_XRAY_HELPER")
+	if mode == "" {
+		return
+	}
+	if mode == "exit" {
+		os.Stderr.WriteString("synthetic xray failure\n")
+		os.Exit(7)
+	}
+	if mode == "timeout" {
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	}
+	var path string
+	for i, arg := range os.Args {
+		if arg == "-c" && i+1 < len(os.Args) {
+			path = os.Args[i+1]
+		}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		os.Exit(2)
+	}
+	var cfg struct {
+		Inbounds []struct {
+			Port int `json:"port"`
+		} `json:"inbounds"`
+	}
+	if json.Unmarshal(data, &cfg) != nil || len(cfg.Inbounds) != 1 {
+		os.Exit(3)
+	}
+	ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", cfg.Inbounds[0].Port))
+	if err != nil {
+		os.Exit(4)
+	}
+	defer ln.Close()
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			os.Exit(5)
+		}
+		conn.Close()
+		os.Stdout.WriteString("test connection\n")
+	}
+}
+
+func fakeXray(t *testing.T, mode string) string {
+	t.Helper()
+	t.Setenv("TUNCLI_XRAY_HELPER", mode)
+	t.Setenv("TUNCLI_TEST_BINARY", os.Args[0])
+	dir := t.TempDir()
+	t.Setenv("TMPDIR", dir)
+	path := filepath.Join(dir, "xray")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec \"$TUNCLI_TEST_BINARY\" -test.run=^TestXrayProcessHelper$ -- \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func xrayTestNode() *config.Node {
+	return &config.Node{Protocol: "vless", Server: "192.0.2.1", Port: 443, RawConfig: map[string]interface{}{"type": "vless", "network": "xhttp", "uuid": "00000000-0000-4000-8000-000000000001"}}
+}
+
+func TestXrayLifecycleAndRepeatedStop(t *testing.T) {
+	path := fakeXray(t, "serve")
+	sidecar, err := startXraySidecar(xrayTestNode(), 0, path, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cleaned := 0
+	sidecar.cleanupRule = func() { cleaned++ }
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Go(func() {
+			if err := sidecar.Stop(); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
+		})
+	}
+	wg.Wait()
+	if cleaned != 1 {
+		t.Fatalf("cleanup called %d times", cleaned)
+	}
+	select {
+	case <-sidecar.done:
+	default:
+		t.Fatal("child not reaped")
+	}
+	if _, err := os.Stat(sidecar.ConfigFile); !os.IsNotExist(err) {
+		t.Fatalf("temporary config remains: %v", err)
+	}
+}
+
+func TestXrayStartupFailureCleansConfig(t *testing.T) {
+	for _, mode := range []string{"exit", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			path := fakeXray(t, mode)
+			_, err := startXraySidecar(xrayTestNode(), 0, path, false)
+			if err == nil {
+				t.Fatal("startup succeeded")
+			}
+			if mode == "exit" && !strings.Contains(err.Error(), "synthetic xray failure") {
+				t.Fatalf("diagnostic lost: %v", err)
+			}
+			matches, err := filepath.Glob(filepath.Join(os.Getenv("TMPDIR"), "tuncli-xray-*.json"))
+			if err != nil || len(matches) != 0 {
+				t.Fatalf("config leak: %v, %v", matches, err)
+			}
+		})
+	}
+}
+
+func TestGenerateXrayConfigTLSOptionsAndDefaultPath(t *testing.T) {
+	for _, alpn := range []interface{}{"h2,http/1.1", []interface{}{"h2", "http/1.1"}, []string{"h2", "http/1.1"}} {
+		node := xrayTestNode()
+		node.RawConfig["security"] = "tls"
+		node.RawConfig["alpn"] = alpn
+		node.RawConfig["insecure"] = "1"
+		data, err := GenerateXrayConfig(node, 10815, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		stream := cfg["outbounds"].([]interface{})[0].(map[string]interface{})["streamSettings"].(map[string]interface{})
+		tls := stream["tlsSettings"].(map[string]interface{})
+		if tls["allowInsecure"] != true || len(tls["alpn"].([]interface{})) != 2 {
+			t.Fatalf("TLS options lost: %v", tls)
+		}
+		if stream["xhttpSettings"].(map[string]interface{})["path"] != "/" {
+			t.Fatal("wrong default path")
+		}
+		if _, ok := stream["sockopt"]; ok {
+			t.Fatal("proxy mode needs no privileged socket options")
+		}
 	}
 }

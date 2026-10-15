@@ -2,158 +2,194 @@ package runner
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
-	"github.com/brawler2011/tuncli/pkg/config"
+	"golang.org/x/sys/unix"
 )
 
+// ProcessInfo identifies a particular process, rather than a reusable PID alone.
 type ProcessInfo struct {
-	TuncliPID int `json:"tuncli_pid"`
-	XrayPID   int `json:"xray_pid,omitempty"`
+	TuncliPID int    `json:"tuncli_pid"`
+	StartTime string `json:"start_time"`
 }
 
-func getPidFilePath() string {
-	dir, err := config.GetConfigDir()
-	if err == nil {
-		testPath := filepath.Join(dir, "tuncli.pid")
-		if f, err := os.OpenFile(testPath, os.O_RDWR|os.O_CREATE, 0666); err == nil {
-			_ = f.Close()
-			return testPath
+func processDir() string { return fmt.Sprintf("/tmp/tuncli-%d", os.Geteuid()) }
+
+// Keep runtime state out of the user's config directory: sudo must never trust
+// a user-writable PID file. Open relative to a verified directory descriptor.
+func openProcessFile(dir string, create bool) (*os.File, error) {
+	if create {
+		if err := os.Mkdir(dir, 0700); err != nil && !os.IsExist(err) {
+			return nil, err
 		}
 	}
-	return "/tmp/tuncli.pid"
+	dfd, err := unix.Open(dir, unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer unix.Close(dfd)
+	var st unix.Stat_t
+	if err := unix.Fstat(dfd, &st); err != nil {
+		return nil, err
+	}
+	if st.Uid != uint32(os.Geteuid()) || st.Mode&0777 != 0700 {
+		return nil, fmt.Errorf("unsafe runtime directory: %s", dir)
+	}
+	flags := unix.O_RDWR | unix.O_NOFOLLOW | unix.O_CLOEXEC | unix.O_NONBLOCK
+	if create {
+		flags |= unix.O_CREAT
+	}
+	fd, err := unix.Openat(dfd, "tuncli.pid", flags, 0600)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), filepath.Join(dir, "tuncli.pid"))
+	if err := unix.Fstat(fd, &st); err != nil {
+		f.Close()
+		return nil, err
+	}
+	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) || st.Mode&0777 != 0600 || st.Nlink != 1 {
+		f.Close()
+		return nil, fmt.Errorf("unsafe PID file")
+	}
+	return f, nil
 }
 
-func writePidFile(tuncliPID int, xrayPID int) error {
-	path := getPidFilePath()
-	info := ProcessInfo{
-		TuncliPID: tuncliPID,
-		XrayPID:   xrayPID,
+func processStartTime(pid int) (string, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", err
 	}
-	data, err := json.Marshal(info)
+	// comm may contain spaces and parentheses; fields after its last ')' start at 3.
+	end := strings.LastIndexByte(string(data), ')')
+	if end < 0 {
+		return "", fmt.Errorf("invalid process stat")
+	}
+	fields := strings.Fields(string(data[end+1:]))
+	if len(fields) < 20 || fields[0] == "Z" {
+		return "", fmt.Errorf("process is unavailable")
+	}
+	return fields[19], nil
+}
+
+func acquireProcessFile(dir string) (func(), error) {
+	f, err := openProcessFile(dir, true)
+	if err != nil {
+		return nil, err
+	}
+	fail := func(err error) (func(), error) { f.Close(); return nil, err }
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+		return fail(fmt.Errorf("another tuncli instance is running: %w", err))
+	}
+	start, err := processStartTime(os.Getpid())
+	if err != nil {
+		return fail(err)
+	}
+	data, err := json.Marshal(ProcessInfo{TuncliPID: os.Getpid(), StartTime: start})
+	if err != nil {
+		return fail(err)
+	}
+	if err := f.Truncate(0); err != nil {
+		return fail(err)
+	}
+	if _, err := f.WriteAt(data, 0); err != nil {
+		return fail(err)
+	}
+	return func() {
+		// Leave the inode in place so concurrent starters all lock the same file.
+		_ = f.Truncate(0)
+		_ = f.Close()
+	}, nil
+}
+
+func verifiedProcess(info ProcessInfo) (int, error) {
+	if info.TuncliPID <= 0 || info.StartTime == "" {
+		return -1, fmt.Errorf("invalid PID record")
+	}
+	if _, err := strconv.ParseUint(info.StartTime, 10, 64); err != nil {
+		return -1, err
+	}
+	// pidfd pins the process identity even if it exits and Linux reuses its PID.
+	fd, err := unix.PidfdOpen(info.TuncliPID, 0)
+	if err != nil {
+		return -1, err
+	}
+	fail := func(err error) (int, error) { unix.Close(fd); return -1, err }
+	start, err := processStartTime(info.TuncliPID)
+	if err != nil {
+		return fail(err)
+	}
+	if start != info.StartTime {
+		return fail(fmt.Errorf("stale PID record"))
+	}
+	self, err := os.Stat("/proc/self/exe")
+	if err != nil {
+		return fail(err)
+	}
+	target, err := os.Stat(fmt.Sprintf("/proc/%d/exe", info.TuncliPID))
+	if err != nil {
+		return fail(err)
+	}
+	if !os.SameFile(self, target) {
+		return fail(fmt.Errorf("PID does not belong to this tuncli executable"))
+	}
+	return fd, nil
+}
+
+func stopProcessFile(dir string) error {
+	f, err := openProcessFile(dir, false)
+	if err != nil {
+		return fmt.Errorf("cannot open tuncli runtime state (use the same user/sudo as start): %w", err)
+	}
+	defer f.Close()
+	// An unlocked file is stale. Never signal a PID from such a file.
+	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err == nil {
+		return fmt.Errorf("tuncli is not currently running")
+	} else if !errors.Is(err, unix.EWOULDBLOCK) {
+		return err
+	}
+	data, err := io.ReadAll(io.LimitReader(f, 4096))
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0666)
-}
-
-func removePidFile() error {
-	paths := []string{"/tmp/tuncli.pid"}
-	if dir, err := config.GetConfigDir(); err == nil {
-		paths = append(paths, filepath.Join(dir, "tuncli.pid"))
+	var info ProcessInfo
+	if err := json.Unmarshal(data, &info); err != nil {
+		return fmt.Errorf("invalid PID record: %w", err)
 	}
-	for _, p := range paths {
-		_ = os.Remove(p)
-	}
-	return nil
-}
-
-func readPidFile() (*ProcessInfo, error) {
-	paths := []string{}
-	if dir, err := config.GetConfigDir(); err == nil {
-		paths = append(paths, filepath.Join(dir, "tuncli.pid"))
-	}
-	paths = append(paths, "/tmp/tuncli.pid")
-
-	for _, p := range paths {
-		data, err := os.ReadFile(p)
-		if err == nil {
-			var info ProcessInfo
-			if err := json.Unmarshal(data, &info); err == nil {
-				return &info, nil
-			}
-		}
-	}
-	return nil, os.ErrNotExist
-}
-
-func isProcessRunning(pid int) bool {
-	if pid <= 0 {
-		return false
-	}
-	proc, err := os.FindProcess(pid)
+	fd, err := verifiedProcess(info)
 	if err != nil {
-		return false
+		return fmt.Errorf("refusing to signal an unverified process: %w", err)
 	}
-	if err := proc.Signal(syscall.Signal(0)); err != nil {
-		return false
+	defer unix.Close(fd)
+	if err := unix.PidfdSendSignal(fd, syscall.SIGTERM, nil, 0); err != nil {
+		return fmt.Errorf("stop tuncli: %w", err)
 	}
-	// On Linux, check if process is in zombie / defunct state
-	statusData, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
-	if err == nil {
-		for _, line := range strings.Split(string(statusData), "\n") {
-			if strings.HasPrefix(line, "State:") {
-				if strings.Contains(line, "Z (zombie)") {
-					return false
-				}
-				break
-			}
+	poll := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		n, err := unix.Poll(poll, 100)
+		if errors.Is(err, unix.EINTR) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n > 0 {
+			fmt.Println("VPN stopped successfully.")
+			return nil
 		}
 	}
-	return true
+	// Do not force kill the parent: it owns network and sidecar cleanup.
+	return fmt.Errorf("tuncli did not finish shutdown within 5 seconds")
 }
 
-// Stop stops the currently running tuncli instance and any associated Xray sidecar.
-func Stop() error {
-	info, err := readPidFile()
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("tuncli is not currently running (no active PID file found)")
-		}
-		return fmt.Errorf("failed to read PID file: %w", err)
-	}
-
-	stopped := false
-	if info.TuncliPID > 0 && isProcessRunning(info.TuncliPID) {
-		proc, err := os.FindProcess(info.TuncliPID)
-		if err == nil {
-			fmt.Printf("Stopping tuncli (PID %d)...\n", info.TuncliPID)
-			_ = proc.Signal(syscall.SIGTERM)
-
-			for i := 0; i < 30; i++ {
-				time.Sleep(100 * time.Millisecond)
-				if !isProcessRunning(info.TuncliPID) {
-					stopped = true
-					break
-				}
-			}
-			if !stopped {
-				fmt.Println("Force killing tuncli...")
-				_ = proc.Signal(syscall.SIGKILL)
-			}
-		}
-	}
-
-	if info.XrayPID > 0 && isProcessRunning(info.XrayPID) {
-		xproc, err := os.FindProcess(info.XrayPID)
-		if err == nil {
-			fmt.Printf("Stopping Xray sidecar (PID %d)...\n", info.XrayPID)
-			_ = xproc.Signal(syscall.SIGTERM)
-			xStopped := false
-			for i := 0; i < 15; i++ {
-				time.Sleep(50 * time.Millisecond)
-				if !isProcessRunning(info.XrayPID) {
-					xStopped = true
-					break
-				}
-			}
-			if !xStopped {
-				_ = xproc.Signal(syscall.SIGKILL)
-			}
-		}
-	}
-
-	if os.Geteuid() == 0 {
-		_ = exec.Command("ip", "rule", "del", "fwmark", fmt.Sprintf("%d", DefaultXrayMark), "lookup", "main", "priority", "8990").Run()
-	}
-
-	_ = removePidFile()
-	fmt.Println("VPN stopped successfully.")
-	return nil
-}
+// Stop asks the running instance to close its VPN and sidecar gracefully.
+func Stop() error { return stopProcessFile(processDir()) }

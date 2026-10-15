@@ -9,6 +9,7 @@ import (
 var stopCmd = &cobra.Command{
 	Use:   "stop",
 	Short: "Stop the running VPN connection",
+	Args:  cobra.NoArgs,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runner.Stop()
 	},

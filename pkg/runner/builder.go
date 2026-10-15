@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	"github.com/brawler2011/tuncli/pkg/config"
@@ -16,26 +17,29 @@ import (
 
 func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xrayPort ...int) (option.Options, error) {
 	var opts option.Options
+	if node == nil {
+		return opts, fmt.Errorf("node is nil")
+	}
+	if mode != "tun" && mode != "proxy" {
+		return opts, fmt.Errorf("invalid mode %q", mode)
+	}
 
-	if node != nil {
-		if (len(node.RawConfig) == 0 || node.Server == "") && node.RawLink != "" {
-			if parsed, err := sub.ParseSingleURI(node.RawLink); err == nil {
-				if len(node.RawConfig) == 0 && len(parsed.RawConfig) > 0 {
-					node.RawConfig = parsed.RawConfig
-				}
-				if node.Protocol == "" {
-					node.Protocol = parsed.Protocol
-				}
-				if node.Server == "" {
-					node.Server = parsed.Server
-				}
-				if node.Port == 0 {
-					node.Port = parsed.Port
-				}
+	if (len(node.RawConfig) == 0 || node.Server == "") && node.RawLink != "" {
+		if parsed, err := sub.ParseSingleURI(node.RawLink); err == nil {
+			if len(node.RawConfig) == 0 && len(parsed.RawConfig) > 0 {
+				node.RawConfig = parsed.RawConfig
+			}
+			if node.Protocol == "" {
+				node.Protocol = parsed.Protocol
+			}
+			if node.Server == "" {
+				node.Server = parsed.Server
+			}
+			if node.Port == 0 {
+				node.Port = parsed.Port
 			}
 		}
 	}
-
 	// Determine the proxy server address for bypass rules
 	proxyServer := ""
 	if node != nil {
@@ -46,11 +50,6 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 
 	if mode == "tun" {
 		routeRules = append(routeRules, map[string]interface{}{
-			"port":    []int{443},
-			"network": []string{"udp"},
-			"action":  "reject",
-		})
-		routeRules = append(routeRules, map[string]interface{}{
 			"port":   []int{53},
 			"action": "hijack-dns",
 		})
@@ -59,8 +58,12 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 	proxyIP := ""
 	if net.ParseIP(proxyServer) != nil {
 		proxyIP = proxyServer
+		prefix := "/32"
+		if net.ParseIP(proxyServer).To4() == nil {
+			prefix = "/128"
+		}
 		routeRules = append(routeRules, map[string]interface{}{
-			"ip_cidr":  []string{proxyServer + "/32"},
+			"ip_cidr":  []string{proxyServer + prefix},
 			"outbound": "direct",
 		})
 	} else if proxyServer != "" {
@@ -194,6 +197,22 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 // convertToSingboxOutbound converts from Clash/subscription format to sing-box format
 func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, defaultServerName string) map[string]interface{} {
 	out := make(map[string]interface{})
+	// Native sing-box outbounds already have the correct schema. Rebuilding them
+	// as Clash nodes loses nested TLS/transport and protocol-specific options.
+	if _, native := raw["server_port"]; native {
+		for k, v := range raw {
+			out[k] = v
+		}
+		if tls, ok := raw["tls"].(map[string]interface{}); ok && tls["server_name"] == nil && net.ParseIP(defaultServerName) == nil && defaultServerName != "" {
+			copyTLS := make(map[string]interface{}, len(tls)+1)
+			for k, v := range tls {
+				copyTLS[k] = v
+			}
+			copyTLS["server_name"] = defaultServerName
+			out["tls"] = copyTLS
+		}
+		return out
+	}
 
 	// Determine protocol type
 	typ, _ := raw["type"].(string)
@@ -264,9 +283,56 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 		out["password"] = auth
 	}
 
+	if proto == "hysteria" {
+		if password, ok := out["password"]; ok {
+			out["auth_str"] = password
+			delete(out, "password")
+		}
+		if auth, ok := raw["auth-str"]; ok {
+			out["auth_str"] = auth
+		}
+		if obfs, ok := raw["obfs"].(string); ok {
+			out["obfs"] = obfs
+		}
+	}
+	if packetEncoding, ok := raw["packet-encoding"].(string); ok && (proto == "vless" || proto == "vmess") {
+		out["packet_encoding"] = packetEncoding
+	}
+
 	// Encryption / Cipher / Method
 	switch proto {
 	case "shadowsocks":
+		if plugin, ok := raw["plugin"].(string); ok && plugin != "" {
+			name, options, _ := strings.Cut(plugin, ";")
+			if name == "obfs" {
+				name = "obfs-local"
+			}
+			out["plugin"] = name
+			if opts, ok := raw["plugin-opts"].(map[string]interface{}); ok {
+				var parts []string
+				for k, v := range opts {
+					if name == "obfs-local" {
+						if k == "mode" {
+							k = "obfs"
+						} else if k == "host" {
+							k = "obfs-host"
+						}
+					}
+					if enabled, ok := v.(bool); ok {
+						if enabled {
+							parts = append(parts, k)
+						}
+					} else {
+						parts = append(parts, k+"="+fmt.Sprint(v))
+					}
+				}
+				sort.Strings(parts)
+				options = strings.Join(parts, ";")
+			}
+			if options != "" {
+				out["plugin_opts"] = options
+			}
+		}
 		if cipher, ok := raw["cipher"].(string); ok && cipher != "" {
 			out["method"] = cipher
 		}
@@ -349,6 +415,8 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 			}
 			if maxEarlyData, ok := wsOpts["max-early-data"].(float64); ok {
 				wsMap["max_early_data"] = uint32(maxEarlyData)
+			} else if maxEarlyData, ok := wsOpts["max-early-data"].(int); ok {
+				wsMap["max_early_data"] = uint32(maxEarlyData)
 			}
 			if earlyDataHeaderName, ok := wsOpts["early-data-header-name"].(string); ok {
 				wsMap["early_data_header_name"] = earlyDataHeaderName
@@ -407,7 +475,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	}
 
 	// Hysteria 2 specific options
-	if proto == "hysteria2" {
+	if proto == "hysteria2" || proto == "hysteria" {
 		if up, ok := raw["up"].(float64); ok {
 			out["up_mbps"] = int(up)
 		} else if up, ok := raw["up"].(int); ok {
@@ -428,7 +496,7 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 				out["down_mbps"] = mbps
 			}
 		}
-		if obfsType, ok := raw["obfs"].(string); ok && obfsType != "" {
+		if obfsType, ok := raw["obfs"].(string); ok && obfsType != "" && proto == "hysteria2" {
 			obfsPassword, _ := raw["obfs-password"].(string)
 			out["obfs"] = map[string]interface{}{
 				"type":     obfsType,
@@ -551,4 +619,34 @@ func convertToSingboxOutbound(raw map[string]interface{}, protocolHint string, d
 	}
 
 	return out
+}
+
+func truthy(v interface{}) bool {
+	switch v := v.(type) {
+	case bool:
+		return v
+	case string:
+		return v == "true" || v == "1"
+	}
+	return false
+}
+func stringList(v interface{}) []string {
+	var result []string
+	switch v := v.(type) {
+	case []string:
+		return v
+	case []interface{}:
+		for _, item := range v {
+			if s, ok := item.(string); ok && s != "" {
+				result = append(result, s)
+			}
+		}
+	case string:
+		for _, item := range strings.Split(v, ",") {
+			if s := strings.TrimSpace(item); s != "" {
+				result = append(result, s)
+			}
+		}
+	}
+	return result
 }

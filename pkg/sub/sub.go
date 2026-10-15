@@ -375,7 +375,7 @@ func parseSingleURI(link string) (Node, error) {
 		case "trojan", "hysteria2", "hysteria":
 			rawConfig["password"] = user
 			if pass, ok := u.User.Password(); ok && pass != "" {
-				rawConfig["password"] = pass
+				rawConfig["password"] = user + ":" + pass
 			}
 		}
 	}
@@ -434,11 +434,7 @@ func parseSingleURI(link string) (Node, error) {
 	}
 
 	if path := q.Get("path"); path != "" {
-		if unescaped, err := url.QueryUnescape(path); err == nil {
-			rawConfig["path"] = unescaped
-		} else {
-			rawConfig["path"] = path
-		}
+		rawConfig["path"] = path
 	}
 
 	if host := q.Get("host"); host != "" {
@@ -574,12 +570,15 @@ func parseShadowsocksURI(link string) (Node, error) {
 	var port int = 8388
 
 	if strings.Contains(withoutScheme, "@") {
-		parts := strings.SplitN(withoutScheme, "@", 2)
+		at := strings.LastIndex(withoutScheme, "@")
+		parts := []string{withoutScheme[:at], withoutScheme[at+1:]}
 		userInfo := parts[0]
-		hostPort := parts[1]
+		hostPort := strings.TrimSuffix(parts[1], "/")
 
 		if dec, err := decodeBase64Flexible(userInfo); err == nil && strings.Contains(string(dec), ":") {
 			userInfo = string(dec)
+		} else if decoded, err := url.PathUnescape(userInfo); err == nil {
+			userInfo = decoded
 		}
 		if colon := strings.Index(userInfo, ":"); colon != -1 {
 			method = userInfo[:colon]

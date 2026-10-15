@@ -3,12 +3,14 @@ package runner
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -127,7 +129,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 	if mark > 0 {
 		sockopt["mark"] = mark
 	}
-	if iface := GetDefaultInterface(); iface != "" {
+	if iface := GetDefaultInterface(); mark > 0 && iface != "" {
 		sockopt["interface"] = iface
 	}
 	if len(sockopt) > 0 {
@@ -188,13 +190,11 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 			"serverName":  sni,
 			"fingerprint": fp,
 		}
-		if scv, ok := rawConfig["skip-cert-verify"].(bool); ok && scv {
-			tlsSettings["allowInsecure"] = true
-		} else if insec, ok := rawConfig["insecure"].(bool); ok && insec {
-			tlsSettings["allowInsecure"] = true
-		}
-		if alpn, ok := rawConfig["alpn"].([]string); ok && len(alpn) > 0 {
+		if alpn := stringList(rawConfig["alpn"]); len(alpn) > 0 {
 			tlsSettings["alpn"] = alpn
+		}
+		if truthy(rawConfig["skip-cert-verify"]) || truthy(rawConfig["insecure"]) {
+			tlsSettings["allowInsecure"] = true
 		}
 		streamSettings["security"] = "tls"
 		streamSettings["tlsSettings"] = tlsSettings
@@ -205,7 +205,7 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 	// XHTTP settings
 	path, _ := rawConfig["path"].(string)
 	if path == "" {
-		path = "/xhttp"
+		path = "/"
 	}
 
 	mode, _ := rawConfig["mode"].(string)
@@ -272,6 +272,12 @@ func GenerateXrayConfig(node *config.Node, socksPort int, markOption ...int) ([]
 		}
 	}
 
+	if proto != "vless" && proto != "vmess" {
+		return nil, fmt.Errorf("unsupported XHTTP protocol %q", proto)
+	}
+	if server == "" || port <= 0 || port > 65535 || uuid == "" {
+		return nil, fmt.Errorf("XHTTP node requires server, valid port and UUID")
+	}
 	var outboundSettings map[string]interface{}
 	switch proto {
 	case "vmess":
@@ -354,21 +360,21 @@ type XraySidecar struct {
 	ConfigFile  string
 	Cmd         *exec.Cmd
 	cleanupRule func()
+	done        chan struct{}
+	waitErr     error
+	stopOnce    sync.Once
+	stopErr     error
 }
 
-func setupXrayRoutingRule(mark int) func() {
-	if os.Geteuid() != 0 || mark <= 0 {
-		return func() {}
-	}
+func setupXrayRoutingRule(mark int) (func(), error) {
 	markStr := fmt.Sprintf("%d", mark)
-	// Delete any existing rule first to prevent accumulation
-	_ = exec.Command("ip", "rule", "del", "fwmark", markStr, "lookup", "main", "priority", "8990").Run()
+	// Only remove a rule successfully created by this instance.
 	if err := exec.Command("ip", "rule", "add", "fwmark", markStr, "lookup", "main", "priority", "8990").Run(); err != nil {
-		fmt.Fprintf(os.Stderr, "Warning: failed to add ip rule for Xray fwmark %d: %v\n", mark, err)
+		return nil, fmt.Errorf("add Xray routing rule: %w", err)
 	}
 	return func() {
 		_ = exec.Command("ip", "rule", "del", "fwmark", markStr, "lookup", "main", "priority", "8990").Run()
-	}
+	}, nil
 }
 
 func findXrayBinary() string {
@@ -400,8 +406,11 @@ func getFreePort(preferred int) (int, error) {
 }
 
 // StartXraySidecar starts an Xray process in the background with the generated config.
-func StartXraySidecar(node *config.Node, preferredPort int) (*XraySidecar, error) {
-	xrayPath := findXrayBinary()
+func StartXraySidecar(node *config.Node, preferredPort int, operatingMode ...string) (*XraySidecar, error) {
+	return startXraySidecar(node, preferredPort, findXrayBinary(), len(operatingMode) == 0 || operatingMode[0] == "tun")
+}
+
+func startXraySidecar(node *config.Node, preferredPort int, xrayPath string, tunMode bool) (*XraySidecar, error) {
 	if xrayPath == "" {
 		return nil, fmt.Errorf("xray binary not found (expected /usr/bin/xray): required for xhttp transport")
 	}
@@ -412,13 +421,16 @@ func StartXraySidecar(node *config.Node, preferredPort int) (*XraySidecar, error
 	}
 
 	mark := DefaultXrayMark
-	if os.Geteuid() != 0 {
+	if os.Geteuid() != 0 || !tunMode {
 		mark = 0
 	}
 
 	var cleanupRule func()
 	if os.Geteuid() == 0 && mark > 0 {
-		cleanupRule = setupXrayRoutingRule(mark)
+		cleanupRule, err = setupXrayRoutingRule(mark)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	cfgBytes, err := GenerateXrayConfig(node, port, mark)
@@ -449,7 +461,8 @@ func StartXraySidecar(node *config.Node, preferredPort int) (*XraySidecar, error
 	_ = tmpFile.Close()
 
 	cmd := exec.Command(xrayPath, "run", "-c", configPath)
-	var errBuf bytes.Buffer
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
+	var errBuf synchronizedBuffer
 	cmd.Stderr = &errBuf
 	cmd.Stdout = &errBuf
 
@@ -468,14 +481,18 @@ func StartXraySidecar(node *config.Node, preferredPort int) (*XraySidecar, error
 		cleanupRule: cleanupRule,
 	}
 
+	sidecar.watchProcess()
+
 	// Wait for Xray to be listening on socks port or exit with error
 	ready := false
 	for i := 0; i < 30; i++ {
 		time.Sleep(50 * time.Millisecond)
 
-		if cmd.ProcessState != nil && cmd.ProcessState.Exited() {
+		select {
+		case <-sidecar.done:
 			_ = sidecar.Stop()
-			return nil, fmt.Errorf("xray process exited unexpectedly: %s", strings.TrimSpace(errBuf.String()))
+			return nil, fmt.Errorf("xray process exited unexpectedly: %v: %s", sidecar.waitErr, strings.TrimSpace(errBuf.String()))
+		default:
 		}
 
 		conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 50*time.Millisecond)
@@ -494,39 +511,63 @@ func StartXraySidecar(node *config.Node, preferredPort int) (*XraySidecar, error
 	return sidecar, nil
 }
 
-// Stop terminates the Xray process and cleans up temporary config files.
+// watchProcess must be called once immediately after Cmd.Start.
+func (s *XraySidecar) watchProcess() {
+	s.done = make(chan struct{})
+	go func() { s.waitErr = s.Cmd.Wait(); close(s.done) }()
+}
+
+// Stop terminates and reaps Xray before removing its network rule and config.
 func (s *XraySidecar) Stop() error {
 	if s == nil {
 		return nil
 	}
-
-	if s.cleanupRule != nil {
-		s.cleanupRule()
-		s.cleanupRule = nil
-	}
-
-	var stopErr error
-	if s.Cmd != nil && s.Cmd.Process != nil {
-		_ = s.Cmd.Process.Signal(syscall.SIGTERM)
-
-		done := make(chan error, 1)
-		go func() {
-			done <- s.Cmd.Wait()
-		}()
-
-		select {
-		case <-done:
-		case <-time.After(1500 * time.Millisecond):
-			_ = s.Cmd.Process.Kill()
-			<-done
+	s.stopOnce.Do(func() {
+		if s.Cmd != nil && s.Cmd.Process != nil {
+			select {
+			case <-s.done:
+			default:
+				if err := s.Cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+					s.stopErr = err
+				}
+				select {
+				case <-s.done:
+				case <-time.After(1500 * time.Millisecond):
+					if err := s.Cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+						s.stopErr = errors.Join(s.stopErr, err)
+					}
+					<-s.done
+				}
+			}
 		}
-	}
-
-	if s.ConfigFile != "" {
-		if err := os.Remove(s.ConfigFile); err != nil && !os.IsNotExist(err) {
-			stopErr = err
+		if s.cleanupRule != nil {
+			s.cleanupRule()
 		}
-	}
-
-	return stopErr
+		if s.ConfigFile != "" {
+			if err := os.Remove(s.ConfigFile); err != nil && !os.IsNotExist(err) {
+				s.stopErr = errors.Join(s.stopErr, err)
+			}
+		}
+	})
+	return s.stopErr
 }
+
+// Xray may emit output while readiness is checked. Bound and synchronize it.
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	n := len(p)
+	if remaining := 64*1024 - b.buf.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.buf.Write(p)
+	}
+	return n, nil
+}
+func (b *synchronizedBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock(); return b.buf.String() }

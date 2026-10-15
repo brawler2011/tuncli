@@ -2,9 +2,12 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/brawler2011/tuncli/pkg/sub"
 	box "github.com/sagernet/sing-box"
 	"github.com/sagernet/sing-box/option"
 )
@@ -406,4 +409,135 @@ func TestBuildSingboxConfig_RawLink_VLESS_WS(t *testing.T) {
 	if hostHeader, ok := vlessOpts.Transport.WebsocketOptions.Headers["Host"]; !ok || len(hostHeader) == 0 || hostHeader[0] != "192.0.2.1" {
 		t.Errorf("expected Host header '192.0.2.1', got %v", vlessOpts.Transport.WebsocketOptions.Headers["Host"])
 	}
+}
+
+func TestNativeSingboxOutboundOptionsSurvive(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	tls := map[string]interface{}{"enabled": true, "server_name": "example.com", "alpn": []interface{}{"http/1.1"}}
+	raw := map[string]interface{}{"type": "vless", "server": "192.0.2.1", "server_port": 443, "uuid": "00000000-0000-4000-8000-000000000001", "packet_encoding": "packetaddr", "tls": tls, "transport": map[string]interface{}{"type": "ws", "path": "/test"}}
+	node := &config.Node{Protocol: "vless", Server: "192.0.2.1", Port: 443, RawConfig: raw}
+	opts, err := BuildSingboxConfig(ctx, node, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := opts.Outbounds[0].Options.(*option.VLESSOutboundOptions)
+	if v.TLS == nil || v.TLS.ServerName != "example.com" || v.Transport == nil || v.Transport.WebsocketOptions.Path != "/test" || v.PacketEncoding == nil || *v.PacketEncoding != "packetaddr" {
+		t.Fatalf("native options lost: %+v", v)
+	}
+	if raw["tag"] != nil {
+		t.Fatal("source node mutated")
+	}
+}
+
+func TestShadowsocksPluginAndPacketEncodingSurvive(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	for _, plugin := range []map[string]interface{}{
+		{"plugin": "v2ray-plugin;tls;host=example.com"},
+		{"plugin": "v2ray-plugin", "plugin-opts": map[string]interface{}{"tls": true, "host": "example.com"}},
+	} {
+		raw := map[string]interface{}{"type": "ss", "server": "192.0.2.1", "port": 8388, "cipher": "aes-128-gcm", "password": "test-password"}
+		for k, v := range plugin {
+			raw[k] = v
+		}
+		opts, err := BuildSingboxConfig(ctx, &config.Node{Protocol: "ss", Server: "192.0.2.1", RawConfig: raw}, "proxy")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ss := opts.Outbounds[0].Options.(*option.ShadowsocksOutboundOptions)
+		if ss.Plugin != "v2ray-plugin" || !strings.Contains(ss.PluginOptions, "host=example.com") || !strings.Contains(ss.PluginOptions, "tls") {
+			t.Fatalf("plugin options lost: %+v", ss)
+		}
+	}
+	opts, err := BuildSingboxConfig(ctx, &config.Node{Protocol: "vless", Server: "192.0.2.1", RawConfig: map[string]interface{}{"type": "vless", "server": "192.0.2.1", "port": 443, "uuid": "00000000-0000-4000-8000-000000000001", "packet-encoding": "xudp"}}, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := opts.Outbounds[0].Options.(*option.VLESSOutboundOptions)
+	if v.PacketEncoding == nil || *v.PacketEncoding != "xudp" {
+		t.Fatal("packet encoding lost")
+	}
+}
+
+func TestHysteriaAuthenticationAndBandwidth(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	node := &config.Node{Protocol: "hysteria", Server: "192.0.2.1", RawLink: "hysteria://test-password@192.0.2.1:443?up=10&down=20&obfs=test-obfs"}
+	opts, err := BuildSingboxConfig(ctx, node, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hy := opts.Outbounds[0].Options.(*option.HysteriaOutboundOptions)
+	if hy.AuthString != "test-password" || hy.UpMbps != 10 || hy.DownMbps != 20 || hy.Obfs != "test-obfs" {
+		t.Fatalf("hysteria options lost: %+v", hy)
+	}
+}
+
+func TestBuilderRejectsInvalidInput(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	if _, err := BuildSingboxConfig(ctx, nil, "proxy"); err == nil {
+		t.Fatal("nil node accepted")
+	}
+	if _, err := BuildSingboxConfig(ctx, &config.Node{}, "invalid"); err == nil {
+		t.Fatal("invalid mode accepted")
+	}
+}
+
+func TestTUNDoesNotBlockQUICAndIPv6BypassIsHostRoute(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	node := &config.Node{Protocol: "vless", Server: "2001:db8::1", RawConfig: map[string]interface{}{"type": "vless", "server": "2001:db8::1", "port": 443, "uuid": "00000000-0000-4000-8000-000000000001"}}
+	opts, err := BuildSingboxConfig(ctx, node, "tun")
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), `"reject"`) || !strings.Contains(string(data), "2001:db8::1/128") {
+		t.Fatalf("unexpected routing: %s", data)
+	}
+}
+
+func TestParsedSubscriptionsRetainOptions(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	for _, tc := range []struct{ name, body string }{
+		{"singbox", `{"outbounds":[{"type":"vless","tag":"test","server":"192.0.2.1","server_port":443,"uuid":"00000000-0000-4000-8000-000000000001","tls":{"enabled":true,"server_name":"example.com"},"transport":{"type":"ws","path":"/test","max_early_data":2048}}]}`},
+		{"clash", "proxies:\n  - name: test\n    type: vless\n    server: 192.0.2.1\n    port: 443\n    uuid: 00000000-0000-4000-8000-000000000001\n    tls: true\n    servername: example.com\n    network: ws\n    ws-opts:\n      path: /test\n      max-early-data: 2048\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			nodes, err := sub.ParseBody(tc.body)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(nodes) != 1 {
+				t.Fatalf("wrong node count: %d", len(nodes))
+			}
+			n := nodes[0]
+			opts, err := BuildSingboxConfig(ctx, &config.Node{Name: n.Name, Protocol: n.Protocol, Server: n.Server, Port: n.Port, RawConfig: n.RawConfig}, "proxy")
+			if err != nil {
+				t.Fatal(err)
+			}
+			v := opts.Outbounds[0].Options.(*option.VLESSOutboundOptions)
+			if v.TLS == nil || v.TLS.ServerName != "example.com" || v.Transport == nil || v.Transport.WebsocketOptions.Path != "/test" || v.Transport.WebsocketOptions.MaxEarlyData != 2048 {
+				t.Fatalf("subscription options lost: %+v", v)
+			}
+		})
+	}
+}
+
+func TestClashObfsPluginCanInitialize(t *testing.T) {
+	ctx := singboxContext(context.Background())
+	node := &config.Node{Protocol: "ss", Server: "192.0.2.1", RawConfig: map[string]interface{}{"type": "ss", "server": "192.0.2.1", "port": 8388, "cipher": "aes-128-gcm", "password": "test-password", "plugin": "obfs", "plugin-opts": map[string]interface{}{"mode": "tls", "host": "example.com"}}}
+	opts, err := BuildSingboxConfig(ctx, node, "proxy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ss := opts.Outbounds[0].Options.(*option.ShadowsocksOutboundOptions)
+	if ss.Plugin != "obfs-local" || ss.PluginOptions != "obfs-host=example.com;obfs=tls" {
+		t.Fatalf("plugin conversion failed: %+v", ss)
+	}
+	instance, err := box.New(box.Options{Context: ctx, Options: opts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer instance.Close()
 }

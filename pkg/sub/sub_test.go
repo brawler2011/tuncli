@@ -135,3 +135,34 @@ func TestParseSingleURI_Hysteria2(t *testing.T) {
 		t.Errorf("expected skip-cert-verify true, got %v", node.RawConfig["skip-cert-verify"])
 	}
 }
+
+func TestURIPathIsDecodedExactlyOnce(t *testing.T) {
+	node, err := ParseSingleURI("vless://00000000-0000-4000-8000-000000000001@192.0.2.1:443?type=ws&path=%2Fone%252Ftwo%2Bthree")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := node.RawConfig["path"]; got != "/one%2Ftwo+three" {
+		t.Fatalf("path changed: %v", got)
+	}
+}
+
+func TestShadowsocksSIP002PluginAndTrailingSlash(t *testing.T) {
+	userInfo := base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:test-password"))
+	node, err := ParseSingleURI("ss://" + userInfo + "@[2001:db8::1]:8388/?plugin=v2ray-plugin%3Btls%3Bhost%3Dexample.com#Test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.Server != "2001:db8::1" || node.Port != 8388 || node.RawConfig["plugin"] != "v2ray-plugin;tls;host=example.com" {
+		t.Fatalf("unexpected node: %+v", node)
+	}
+}
+
+func TestHysteria2PreservesColonInAuthentication(t *testing.T) {
+	node, err := ParseSingleURI("hy2://test-user:test-password@192.0.2.1:443")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.RawConfig["password"] != "test-user:test-password" {
+		t.Fatalf("authentication changed: %v", node.RawConfig["password"])
+	}
+}
