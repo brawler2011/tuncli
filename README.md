@@ -47,7 +47,8 @@ make clean      # Remove build/ and dist/
 Builds, tests, and vet share the feature tags in the Makefile. CI runs the same
 checks and build for pushes and pull requests; tagged releases run checks before
 packaging and publishing. Release builds disable CGO and require tar.
-Tests do not require root or an active VPN connection.
+Tests do not require root or an active VPN connection. If `xray` is installed,
+the runner tests also validate generated Xray configuration with it.
 
 Override `GO`, `BUILD_DIR`, or `DIST_DIR` when needed, for example
 `make build GO=/path/to/go BUILD_DIR=build/debug`. `make clean` only accepts

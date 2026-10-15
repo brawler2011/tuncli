@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -315,12 +316,24 @@ func isDirectURI(uri string) bool {
 		strings.HasPrefix(uri, "trojan://") ||
 		strings.HasPrefix(uri, "ss://") ||
 		strings.HasPrefix(uri, "hysteria2://") ||
-		strings.HasPrefix(uri, "hy2://")
+		strings.HasPrefix(uri, "hy2://") ||
+		strings.HasPrefix(uri, "hysteria://")
+}
+
+func ParseSingleURI(link string) (Node, error) {
+	return parseSingleURI(link)
 }
 
 func parseSingleURI(link string) (Node, error) {
+	link = strings.TrimSpace(link)
 	if !isDirectURI(link) {
 		return Node{}, fmt.Errorf("invalid URI scheme")
+	}
+
+	if strings.HasPrefix(link, "vmess://") {
+		return parseVMessURI(link)
+	} else if strings.HasPrefix(link, "ss://") {
+		return parseShadowsocksURI(link)
 	}
 
 	u, err := url.Parse(link)
@@ -338,6 +351,9 @@ func parseSingleURI(link string) (Node, error) {
 	}
 
 	protocol := strings.TrimSuffix(u.Scheme, "://")
+	if protocol == "hy2" {
+		protocol = "hysteria2"
+	}
 
 	server := u.Hostname()
 	port := 443
@@ -345,31 +361,284 @@ func parseSingleURI(link string) (Node, error) {
 		fmt.Sscanf(p, "%d", &port)
 	}
 
-	if strings.HasPrefix(link, "vmess://") {
-		encoded := strings.TrimPrefix(link, "vmess://")
-		if dec, err := decodeBase64Flexible(encoded); err == nil {
-			var vmessData map[string]interface{}
-			if json.Unmarshal(dec, &vmessData) == nil {
-				if add, ok := vmessData["add"].(string); ok {
-					server = add
+	rawConfig := make(map[string]interface{})
+	rawConfig["name"] = name
+	rawConfig["type"] = protocol
+	rawConfig["server"] = server
+	rawConfig["port"] = port
+
+	if u.User != nil {
+		user := u.User.Username()
+		switch protocol {
+		case "vless":
+			rawConfig["uuid"] = user
+		case "trojan", "hysteria2", "hysteria":
+			rawConfig["password"] = user
+			if pass, ok := u.User.Password(); ok && pass != "" {
+				rawConfig["password"] = pass
+			}
+		}
+	}
+
+	q := u.Query()
+	for k, v := range q {
+		if len(v) > 0 {
+			rawConfig[k] = v[0]
+		}
+	}
+
+	// Normalizations
+	if sni := q.Get("sni"); sni != "" {
+		rawConfig["servername"] = sni
+		rawConfig["sni"] = sni
+	} else if peer := q.Get("peer"); peer != "" {
+		rawConfig["servername"] = peer
+		rawConfig["sni"] = peer
+	}
+
+	if typ := q.Get("type"); typ != "" {
+		rawConfig["network"] = typ
+	}
+
+	if sec := q.Get("security"); sec != "" {
+		rawConfig["security"] = sec
+		if sec == "tls" || sec == "reality" {
+			rawConfig["tls"] = true
+		}
+	}
+	if protocol == "trojan" || protocol == "hysteria2" || protocol == "hysteria" {
+		rawConfig["tls"] = true
+	}
+
+	if pbk := q.Get("pbk"); pbk != "" {
+		rawConfig["reality-opts"] = map[string]interface{}{
+			"public-key": pbk,
+			"short-id":   q.Get("sid"),
+		}
+		rawConfig["pbk"] = pbk
+		rawConfig["sid"] = q.Get("sid")
+		rawConfig["tls"] = true
+	}
+
+	if fp := q.Get("fp"); fp != "" {
+		rawConfig["client-fingerprint"] = fp
+		rawConfig["fp"] = fp
+	}
+
+	if flow := q.Get("flow"); flow != "" {
+		rawConfig["flow"] = flow
+	}
+
+	if insecure := q.Get("insecure"); insecure == "1" || insecure == "true" {
+		rawConfig["skip-cert-verify"] = true
+	}
+
+	if path := q.Get("path"); path != "" {
+		if unescaped, err := url.QueryUnescape(path); err == nil {
+			rawConfig["path"] = unescaped
+		} else {
+			rawConfig["path"] = path
+		}
+	}
+
+	if host := q.Get("host"); host != "" {
+		rawConfig["host"] = host
+	}
+
+	if serviceName := q.Get("serviceName"); serviceName != "" {
+		rawConfig["serviceName"] = serviceName
+	}
+
+	if alpn := q.Get("alpn"); alpn != "" {
+		rawConfig["alpn"] = alpn
+	}
+
+	return Node{
+		Name:      name,
+		Protocol:  protocol,
+		Server:    server,
+		Port:      port,
+		RawLink:   link,
+		RawConfig: rawConfig,
+	}, nil
+}
+
+func parseVMessURI(link string) (Node, error) {
+	encoded := strings.TrimPrefix(link, "vmess://")
+	dec, err := decodeBase64Flexible(encoded)
+	if err != nil {
+		return Node{}, fmt.Errorf("failed to decode vmess base64: %w", err)
+	}
+
+	var vmessData map[string]interface{}
+	if err := json.Unmarshal(dec, &vmessData); err != nil {
+		return Node{}, fmt.Errorf("failed to parse vmess json: %w", err)
+	}
+
+	name := "Unnamed VMess"
+	if ps, ok := vmessData["ps"].(string); ok && ps != "" {
+		name = ps
+	}
+
+	server, _ := vmessData["add"].(string)
+	port := 443
+	if p, ok := vmessData["port"].(float64); ok {
+		port = int(p)
+	} else if pStr, ok := vmessData["port"].(string); ok {
+		fmt.Sscanf(pStr, "%d", &port)
+	}
+
+	rawConfig := make(map[string]interface{})
+	rawConfig["name"] = name
+	rawConfig["type"] = "vmess"
+	rawConfig["server"] = server
+	rawConfig["port"] = port
+
+	if id, ok := vmessData["id"].(string); ok {
+		rawConfig["uuid"] = id
+	}
+	if aid, ok := vmessData["aid"].(float64); ok {
+		rawConfig["alterId"] = int(aid)
+	} else if aidStr, ok := vmessData["aid"].(string); ok {
+		var aid int
+		fmt.Sscanf(aidStr, "%d", &aid)
+		rawConfig["alterId"] = aid
+	}
+	if scy, ok := vmessData["scy"].(string); ok && scy != "" {
+		rawConfig["cipher"] = scy
+	} else {
+		rawConfig["cipher"] = "auto"
+	}
+	if netType, ok := vmessData["net"].(string); ok && netType != "" {
+		rawConfig["network"] = netType
+	}
+	if path, ok := vmessData["path"].(string); ok && path != "" {
+		rawConfig["path"] = path
+	}
+	if host, ok := vmessData["host"].(string); ok && host != "" {
+		rawConfig["host"] = host
+	}
+	if tlsVal, ok := vmessData["tls"].(string); ok && (tlsVal == "tls" || tlsVal == "reality") {
+		rawConfig["tls"] = true
+		rawConfig["security"] = tlsVal
+	}
+	if sni, ok := vmessData["sni"].(string); ok && sni != "" {
+		rawConfig["sni"] = sni
+		rawConfig["servername"] = sni
+	} else if host, ok := vmessData["host"].(string); ok && host != "" {
+		rawConfig["servername"] = host
+	}
+	if alpn, ok := vmessData["alpn"].(string); ok && alpn != "" {
+		rawConfig["alpn"] = alpn
+	}
+	if fp, ok := vmessData["fp"].(string); ok && fp != "" {
+		rawConfig["fp"] = fp
+		rawConfig["client-fingerprint"] = fp
+	}
+
+	return Node{
+		Name:      name,
+		Protocol:  "vmess",
+		Server:    server,
+		Port:      port,
+		RawLink:   link,
+		RawConfig: rawConfig,
+	}, nil
+}
+
+func parseShadowsocksURI(link string) (Node, error) {
+	link = strings.TrimSpace(link)
+	withoutScheme := strings.TrimPrefix(link, "ss://")
+
+	var name string
+	if idx := strings.Index(withoutScheme, "#"); idx != -1 {
+		namePart := withoutScheme[idx+1:]
+		withoutScheme = withoutScheme[:idx]
+		if unescaped, err := url.QueryUnescape(namePart); err == nil {
+			name = unescaped
+		} else {
+			name = namePart
+		}
+	}
+	if name == "" {
+		name = "Shadowsocks Node"
+	}
+
+	var queryPart string
+	if idx := strings.Index(withoutScheme, "?"); idx != -1 {
+		queryPart = withoutScheme[idx+1:]
+		withoutScheme = withoutScheme[:idx]
+	}
+
+	var method, password, server string
+	var port int = 8388
+
+	if strings.Contains(withoutScheme, "@") {
+		parts := strings.SplitN(withoutScheme, "@", 2)
+		userInfo := parts[0]
+		hostPort := parts[1]
+
+		if dec, err := decodeBase64Flexible(userInfo); err == nil && strings.Contains(string(dec), ":") {
+			userInfo = string(dec)
+		}
+		if colon := strings.Index(userInfo, ":"); colon != -1 {
+			method = userInfo[:colon]
+			password = userInfo[colon+1:]
+		}
+
+		if hp, p, err := net.SplitHostPort(hostPort); err == nil {
+			server = hp
+			fmt.Sscanf(p, "%d", &port)
+		} else {
+			server = hostPort
+		}
+	} else {
+		if dec, err := decodeBase64Flexible(withoutScheme); err == nil {
+			decodedStr := string(dec)
+			if idx := strings.Index(decodedStr, "@"); idx != -1 {
+				userPart := decodedStr[:idx]
+				hostPart := decodedStr[idx+1:]
+				if colon := strings.Index(userPart, ":"); colon != -1 {
+					method = userPart[:colon]
+					password = userPart[colon+1:]
 				}
-				if ps, ok := vmessData["ps"].(string); ok {
-					name = ps
-				}
-				if pt, ok := vmessData["port"].(float64); ok {
-					port = int(pt)
-				} else if ptStr, ok := vmessData["port"].(string); ok {
-					fmt.Sscanf(ptStr, "%d", &port)
+				if hp, p, err := net.SplitHostPort(hostPart); err == nil {
+					server = hp
+					fmt.Sscanf(p, "%d", &port)
+				} else {
+					server = hostPart
 				}
 			}
 		}
 	}
 
+	if server == "" {
+		return Node{}, fmt.Errorf("failed to parse shadowsocks URI: server not found")
+	}
+
+	rawConfig := map[string]interface{}{
+		"name":     name,
+		"type":     "shadowsocks",
+		"server":   server,
+		"port":     port,
+		"cipher":   method,
+		"password": password,
+	}
+
+	if queryPart != "" {
+		if q, err := url.ParseQuery(queryPart); err == nil {
+			if plugin := q.Get("plugin"); plugin != "" {
+				rawConfig["plugin"] = plugin
+			}
+		}
+	}
+
 	return Node{
-		Name:     name,
-		Protocol: protocol,
-		Server:   server,
-		Port:     port,
-		RawLink:  link,
+		Name:      name,
+		Protocol:  "shadowsocks",
+		Server:    server,
+		Port:      port,
+		RawLink:   link,
+		RawConfig: rawConfig,
 	}, nil
 }

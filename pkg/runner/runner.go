@@ -40,6 +40,31 @@ func Start(cfg *config.Config) error {
 
 	fmt.Printf("Starting VPN with node: %s [%s]\n", node.Name, cfg.Mode)
 
+	var sidecar *XraySidecar
+	var xrayPort int
+	if IsXHTTP(&node) {
+		fmt.Println("Node uses XHTTP transport. Launching Xray sidecar...")
+		var err error
+		sidecar, err = StartXraySidecar(&node, DefaultXrayPort)
+		if err != nil {
+			return fmt.Errorf("failed to start Xray sidecar: %w", err)
+		}
+		defer func() {
+			fmt.Println("Stopping Xray sidecar...")
+			_ = sidecar.Stop()
+		}()
+		xrayPort = sidecar.Port
+		fmt.Printf("Xray sidecar running on 127.0.0.1:%d\n", xrayPort)
+	}
+
+	xrayPID := 0
+	if sidecar != nil && sidecar.Cmd != nil && sidecar.Cmd.Process != nil {
+		xrayPID = sidecar.Cmd.Process.Pid
+	}
+	if err := writePidFile(os.Getpid(), xrayPID); err == nil {
+		defer removePidFile()
+	}
+
 	ctx := context.Background()
 	logger := log.NewDefaultFactory(ctx, log.Formatter{
 		BaseTime: time.Now(),
@@ -47,7 +72,7 @@ func Start(cfg *config.Config) error {
 	ctx = service.ContextWith(ctx, logger)
 	ctx = singboxContext(ctx)
 
-	options, err := BuildSingboxConfig(ctx, &node, cfg.Mode)
+	options, err := BuildSingboxConfig(ctx, &node, cfg.Mode, xrayPort)
 	if err != nil {
 		return fmt.Errorf("failed to build sing-box config: %w", err)
 	}

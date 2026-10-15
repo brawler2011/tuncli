@@ -17,11 +17,16 @@ import (
 	"github.com/sagernet/sing-box/protocol/direct"
 	"github.com/sagernet/sing-box/protocol/group"
 	"github.com/sagernet/sing-box/protocol/http"
+	"github.com/sagernet/sing-box/protocol/hysteria"
+	"github.com/sagernet/sing-box/protocol/hysteria2"
 	"github.com/sagernet/sing-box/protocol/mixed"
 	"github.com/sagernet/sing-box/protocol/redirect"
+	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	"github.com/sagernet/sing-box/protocol/socks"
+	"github.com/sagernet/sing-box/protocol/trojan"
 	"github.com/sagernet/sing-box/protocol/tun"
 	"github.com/sagernet/sing-box/protocol/vless"
+	"github.com/sagernet/sing-box/protocol/vmess"
 )
 
 func singboxContext(ctx context.Context) context.Context {
@@ -50,6 +55,11 @@ func outboundRegistry() *outbound.Registry {
 	socks.RegisterOutbound(r)
 	http.RegisterOutbound(r)
 	vless.RegisterOutbound(r)
+	hysteria2.RegisterOutbound(r)
+	hysteria.RegisterOutbound(r)
+	vmess.RegisterOutbound(r)
+	trojan.RegisterOutbound(r)
+	shadowsocks.RegisterOutbound(r)
 	return r
 }
 
