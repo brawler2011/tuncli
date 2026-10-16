@@ -10,12 +10,13 @@ DESTDIR ?=
 BUILD_TAGS := with_gvisor,with_dhcp,with_wireguard,with_utls,with_clash_api,with_quic,with_grpc,with_v2ray_api
 GO_FILES := $(shell find cmd pkg -type f -name '*.go') main.go
 
-.PHONY: help build test vet lint fmt fmt-check check check-all test-tun release install clean
+.PHONY: help build test vet lint fmt fmt-check check check-all test-tun test-guard release install clean
 
 help:
 	@printf '%s\n' \
 	  'build      Build build/tuncli (default)' \
 	  'test       Run all unprivileged Go tests' \
+	  'test-guard Run leak protection tests in isolated Linux network namespaces' \
 	  'test-tun   Run real TUN tests in isolated Linux network namespaces' \
 	  'check-all  Run check plus real TUN tests (requires Linux TUN)' \
 	  'vet        Run go vet' \
@@ -39,7 +40,12 @@ test-tun:
 	$(GO) test -c -tags '$(BUILD_TAGS),tun_smoke' -o "$(BUILD_DIR)/tun-smoke.test" ./pkg/runner
 	bash scripts/test-tun.sh "$(BUILD_DIR)/tun-smoke.test"
 
-check-all: check test-tun
+test-guard:
+	mkdir -p "$(BUILD_DIR)"
+	$(GO) test -c -tags '$(BUILD_TAGS),tun_smoke' -o "$(BUILD_DIR)/guard-smoke.test" ./pkg/service
+	bash scripts/test-guard.sh "$(BUILD_DIR)/guard-smoke.test"
+
+check-all: check test-guard test-tun
 
 vet:
 	$(GO) vet -tags '$(BUILD_TAGS)' ./...

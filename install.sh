@@ -43,7 +43,7 @@ DOWNLOAD_URL="https://github.com/$REPO/releases/download/$LATEST_TAG/$TARBALL"
 TMP_DIR=$(mktemp -d)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
-curl -sSL -o "$TMP_DIR/$TARBALL" "$DOWNLOAD_URL"
+curl -fsSL -o "$TMP_DIR/$TARBALL" "$DOWNLOAD_URL"
 
 tar -xzf "$TMP_DIR/$TARBALL" -C "$TMP_DIR"
 
@@ -53,3 +53,7 @@ if [ "$EUID" -ne 0 ] && [ ! -w "$INSTALL_DIR" ]; then
 else
     install -Dm755 "$TMP_DIR/tuncli-linux-$ARCH_SUFFIX" "$INSTALL_DIR/$BINARY_NAME"
 fi
+
+printf '%s\n' 'Installed tuncli. Prepare settings with tuncli add and tuncli select.' \
+  'For background VPN on systemd Linux (requires nftables): sudo tuncli service install' \
+  'For a foreground session: sudo tuncli run (TUN) or tuncli run --mode proxy'

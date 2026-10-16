@@ -8,7 +8,13 @@ import (
 	"strconv"
 )
 
+// Private disables original-user ownership for system service state.
+var Private bool
+
 func Own(path string) error {
+	if Private {
+		return nil
+	}
 	if os.Geteuid() != 0 {
 		return nil
 	}
@@ -32,7 +38,7 @@ func Own(path string) error {
 	return nil
 }
 func Mkdir(path string) error {
-	if err := os.MkdirAll(path, 0755); err != nil {
+	if err := os.MkdirAll(path, directoryMode()); err != nil {
 		return err
 	}
 	return Own(path)
@@ -44,7 +50,7 @@ func Write(path string, data []byte) error {
 	}
 	defer os.Remove(f.Name()) //nolint:errcheck
 	if _, err = f.Write(data); err == nil {
-		err = f.Chmod(0644)
+		err = f.Chmod(fileMode())
 	}
 	if err == nil {
 		err = f.Sync()
@@ -59,5 +65,26 @@ func Write(path string, data []byte) error {
 	if err = Own(f.Name()); err != nil {
 		return err
 	}
-	return os.Rename(f.Name(), path)
+	if err = os.Rename(f.Name(), path); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(path))
+	if err != nil {
+		return err
+	}
+	defer func() { _ = dir.Close() }()
+	return dir.Sync()
+}
+
+func directoryMode() os.FileMode {
+	if Private {
+		return 0700
+	}
+	return 0755
+}
+func fileMode() os.FileMode {
+	if Private {
+		return 0600
+	}
+	return 0644
 }

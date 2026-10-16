@@ -29,7 +29,10 @@ jobs:
 
       - name: Test real TUN routing
         run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
           test -c /dev/net/tun || sudo modprobe tun
+          make test-guard
           make test-tun
 
       - name: Build and Package Assets

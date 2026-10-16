@@ -4,6 +4,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/brawler2011/tuncli/pkg/storage"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 	"gopkg.in/yaml.v3"
@@ -30,8 +33,11 @@ func LoadOrCreateHWID() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(home, ".config", "tuncli")
-	err = os.MkdirAll(dir, 0755)
+	dir, err := config.GetConfigDir()
+	if err != nil {
+		return "", err
+	}
+	err = storage.Mkdir(dir)
 	if err != nil {
 		return "", err
 	}
@@ -47,17 +53,17 @@ func LoadOrCreateHWID() (string, error) {
 
 	// Prefer v2raytun-port HWID if available (device already registered)
 	v2rayHwidPath := filepath.Join(home, ".config", "v2raytun-port", "hwid")
-	if data, err := os.ReadFile(v2rayHwidPath); err == nil {
+	if data, err := os.ReadFile(v2rayHwidPath); err == nil && !storage.Private {
 		hwid := strings.TrimSpace(string(data))
 		if hwid != "" {
-			return hwid, os.WriteFile(hwidPath, []byte(hwid), 0644)
+			return hwid, storage.Write(hwidPath, []byte(hwid))
 		}
 	}
 
 	// Generate UUID v4 format (matching subscription server expectations)
 	hwid := generateUUID()
 
-	return hwid, os.WriteFile(hwidPath, []byte(hwid), 0644)
+	return hwid, storage.Write(hwidPath, []byte(hwid))
 }
 
 func generateUUID() string {
@@ -85,7 +91,7 @@ func FetchAndParse(subURL string) ([]Node, error) {
 		req.Header.Set("X-HWID", hwid)
 	}
 
-	client := &http.Client{}
+	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("request failed: %w", err)
@@ -96,7 +102,10 @@ func FetchAndParse(subURL string) ([]Node, error) {
 		return nil, fmt.Errorf("server returned status: %d %s", resp.StatusCode, resp.Status)
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, (16<<20)+1))
+	if len(bodyBytes) > 16<<20 {
+		return nil, fmt.Errorf("subscription exceeds 16 MiB")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("reading response body failed: %w", err)
 	}

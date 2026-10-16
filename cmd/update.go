@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -23,19 +24,20 @@ var updateCmd = &cobra.Command{
 		if len(args) == 0 {
 			// Update all subscriptions
 			hasSubs := false
+			var failures []error
 			for _, item := range cfg.Subscriptions {
 				if item.Type == "subscription" {
 					hasSubs = true
 					err := updateSubscription(item)
 					if err != nil {
-						fmt.Printf("Error updating %s (%s): %v\n", item.Name, item.ID, err)
+						failures = append(failures, fmt.Errorf("%s: %w", item.Name, err))
 					}
 				}
 			}
 			if !hasSubs {
 				fmt.Println("No subscriptions to update. Add one with 'tuncli add <link>'.")
 			}
-			return nil
+			return errors.Join(failures...)
 		}
 
 		target := args[0]
@@ -83,7 +85,7 @@ var updateCmd = &cobra.Command{
 }
 
 func updateSubscription(item config.SubscriptionItem) error {
-	fmt.Printf("Updating %s (%s) from %s...\n", item.Name, item.ID, item.URL)
+	fmt.Printf("Updating %s (%s)...\n", item.Name, item.ID)
 	fetchedNodes, err := sub.FetchAndParse(item.URL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch/parse: %w", err)
@@ -101,6 +103,22 @@ func updateSubscription(item config.SubscriptionItem) error {
 		}
 	}
 
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		return err
+	}
+	if cfg.SelectedSubscription == item.ID {
+		found := false
+		for _, n := range nodes {
+			if n.Name == cfg.SelectedNode {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("selected node disappeared; retaining previous subscription")
+		}
+	}
 	err = config.SaveSubscriptionNodes(item.ID, nodes)
 	if err != nil {
 		return fmt.Errorf("failed to save: %w", err)
