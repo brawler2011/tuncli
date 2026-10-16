@@ -60,6 +60,7 @@ func TestRoutingLegacyAndModes(t *testing.T) {
 			assert.Equal(t, "proxy", opts.Route.Final)
 			assert.Len(t, opts.Route.RuleSet, 2)
 			if mode == "tun" {
+				assert.Equal(t, "gvisor", opts.Inbounds[0].Options.(*option.TunInboundOptions).Stack)
 				assert.Len(t, opts.Inbounds[0].Options.(*option.TunInboundOptions).Address, 2)
 				require.NotNil(t, opts.Experimental)
 				assert.True(t, opts.Experimental.CacheFile.StoreFakeIP)

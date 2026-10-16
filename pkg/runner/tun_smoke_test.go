@@ -6,15 +6,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sys/unix"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -193,26 +197,25 @@ func TestTUNSmoke(t *testing.T) {
 			}{{"ozon.ru", routing.Direct}, {"gosuslugi.ru", routing.Direct}, {"gemini.google.com", routing.VPN}, {"my.itmo.ru", routing.Direct}, {"sub.itmo.ru", routing.VPN}, {"overlap.ru", routing.VPN}, {"unknown.example", def}}
 			saved := map[string]string{}
 			for restart := range 2 {
-				ctx := service.ContextWithDefaultRegistry(singboxContext(context.Background()))
+				ctx, cancelTUN := context.WithCancel(service.ContextWithDefaultRegistry(singboxContext(context.Background())))
+				t.Cleanup(cancelTUN)
 				node := routingNode()
 				node.Server = "192.0.2.2"
 				node.RawConfig["server"] = node.Server
 				node.RawConfig["password"] = smokePassword
 				opts, err := BuildSingboxConfigWithPolicy(ctx, node, "tun", prepared)
 				require.NoError(t, err)
-				opts.Log = &option.LogOptions{Level: "error", DisableColor: true}
+				opts.Log = &option.LogOptions{Level: "debug", DisableColor: true, Output: filepath.Join(dir, fmt.Sprintf("engine-%s-%d.log", def, restart))}
 				// Only fixture addresses and its test TLS certificate differ from production.
 				opts.DNS.Servers[0].Options.(*option.RemoteHTTPSDNSServerOptions).Server = "192.0.2.2"
 				opts.DNS.Servers[0].Options.(*option.RemoteHTTPSDNSServerOptions).ServerPort = 8443
 				opts.DNS.Servers[0].Options.(*option.RemoteHTTPSDNSServerOptions).TLS = &option.OutboundTLSOptions{Enabled: true, Insecure: true}
 				opts.DNS.Servers[1].Options.(*option.RemoteDNSServerOptions).Server = "192.0.2.2"
 				opts.DNS.Servers[1].Options.(*option.RemoteDNSServerOptions).ServerPort = 5353
-				instance, err := box.New(box.Options{Context: ctx, Options: opts})
-				require.NoError(t, err)
-				require.NoError(t, instance.Start())
+				stopEngine := startSmokeEngine(t, dir, ctx, opts, fmt.Sprintf("%s-%d", def, restart))
 				// Close even after a failed assertion so later namespace cleanup cannot hang.
 				func() {
-					defer func() { assert.NoError(t, instance.Close()) }()
+					defer func() { cancelTUN(); stopEngine() }()
 					iface, err := net.InterfaceByName("tuncli-tun0")
 					require.NoError(t, err)
 					addresses, err := iface.Addrs()
@@ -268,6 +271,14 @@ func TestTUNSmoke(t *testing.T) {
 							smokeTransfer(t, fake, tc.route)
 						}
 					}
+					for _, domain := range []string{"ozon.ru", "gemini.google.com"} {
+						want := routing.Direct
+						if domain == "gemini.google.com" {
+							want = routing.VPN
+						}
+						smokePinnedTCP(t, saved[fmt.Sprintf("%s/%d", domain, dns.TypeA)], want, 22000+restart+10*int(def[0]))
+					}
+					smokeReusedUDP(t, saved[fmt.Sprintf("ozon.ru/%d", dns.TypeA)], saved[fmt.Sprintf("gemini.google.com/%d", dns.TypeA)])
 					data, err := os.ReadFile(filepath.Join(dir, "dns.jsonl"))
 					require.NoError(t, err)
 					events := map[string][]smokeDNSEvent{}
@@ -319,4 +330,119 @@ func smokeTransfer(t *testing.T, fake string, want routing.Outbound) {
 	require.NoError(t, err, "UDP %s", fake)
 	require.NoError(t, conn.Close())
 	assert.Equal(t, string(want), string(buffer[:n]), "UDP %s", fake)
+}
+
+func smokePinnedTCP(t *testing.T, fake string, want routing.Outbound, port int) {
+	t.Helper()
+	dialer := &net.Dialer{LocalAddr: &net.TCPAddr{IP: net.ParseIP("172.19.0.1"), Port: port}, Control: func(_, _ string, c syscall.RawConn) error {
+		var sockErr error
+		err := c.Control(func(fd uintptr) { sockErr = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_REUSEADDR, 1) })
+		if err != nil {
+			return err
+		}
+		return sockErr
+	}}
+	transport := &http.Transport{DialContext: dialer.DialContext, DisableKeepAlives: true}
+	defer transport.CloseIdleConnections()
+	response, err := (&http.Client{Transport: transport, Timeout: 3 * time.Second}).Get("http://" + net.JoinHostPort(fake, "8080") + "/")
+	require.NoError(t, err)
+	body, err := io.ReadAll(response.Body)
+	require.NoError(t, err)
+	require.NoError(t, response.Body.Close())
+	assert.Equal(t, string(want), string(body), "reused source port %d", port)
+}
+
+// Run each engine lifetime in a separate process, as tuncli start does. This
+// also releases duplicated TUN file descriptors and kernel sockets on restart.
+func startSmokeEngine(t *testing.T, dir string, ctx context.Context, opts option.Options, label string) func() {
+	t.Helper()
+	path := filepath.Join(dir, "options-"+label+".json")
+	payload, err := singJSON.MarshalContext(ctx, opts)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, payload, 0600))
+	executable, err := os.Executable()
+	require.NoError(t, err)
+	child := exec.Command(executable, "-test.run=^TestTUNSmokeEngine$", "-test.timeout=60s")
+	child.Env = append(os.Environ(), "TUN_SMOKE_OPTIONS="+path)
+	child.Stdout = os.Stdout
+	child.Stderr = os.Stderr
+	require.NoError(t, child.Start())
+	done := make(chan struct{})
+	var waitErr error
+	go func() { waitErr = child.Wait(); close(done) }()
+	var once sync.Once
+	stop := func() {
+		once.Do(func() {
+			select {
+			case <-done:
+			default:
+				if err := child.Process.Signal(syscall.SIGTERM); err != nil {
+					t.Errorf("signal engine: %v", err)
+				}
+			}
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				_ = child.Process.Kill()
+				<-done
+				t.Error("engine did not stop within 5 seconds")
+			}
+			assert.NoError(t, waitErr, "engine subprocess")
+		})
+	}
+	t.Cleanup(stop)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path + ".ready"); err == nil {
+			return stop
+		}
+		select {
+		case <-done:
+			require.NoError(t, waitErr)
+			t.Fatal("engine exited before readiness")
+		default:
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("engine subprocess did not become ready")
+	return stop
+}
+func TestTUNSmokeEngine(t *testing.T) {
+	smokeDirectory(t)
+	path := os.Getenv("TUN_SMOKE_OPTIONS")
+	require.NotEmpty(t, path, "engine helper must be launched by the smoke test")
+	payload, err := os.ReadFile(path)
+	require.NoError(t, err)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	ctx = service.ContextWithDefaultRegistry(singboxContext(ctx))
+	opts, err := singJSON.UnmarshalExtendedContext[option.Options](ctx, payload)
+	require.NoError(t, err)
+	opts.Log.DisableColor = true
+	instance, err := box.New(box.Options{Context: ctx, Options: opts})
+	require.NoError(t, err)
+	defer func() { cancel(); assert.NoError(t, instance.Close()) }()
+	require.NoError(t, instance.Start())
+	smokeMarker(t, path+".ready")
+	<-ctx.Done()
+}
+
+// One UDP socket sends to different domains. The destination must participate
+// in NAT lookup so DNS interception and per-domain routing remain independent.
+func smokeReusedUDP(t *testing.T, direct, vpn string) {
+	t.Helper()
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("172.19.0.1")})
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	for _, tc := range []struct{ address, want string }{{direct, "direct"}, {vpn, "vpn"}, {direct, "direct"}} {
+		require.NoError(t, conn.SetDeadline(time.Now().Add(3*time.Second)))
+		peer := &net.UDPAddr{IP: net.ParseIP(tc.address), Port: 8081}
+		_, err := conn.WriteToUDP([]byte("same-source"), peer)
+		require.NoError(t, err)
+		payload := make([]byte, 128)
+		n, from, err := conn.ReadFromUDP(payload)
+		require.NoError(t, err)
+		assert.Equal(t, tc.want, string(payload[:n]), "UDP source %s destination %s", conn.LocalAddr(), peer)
+		assert.Equal(t, peer.String(), from.String())
+	}
 }

@@ -51,6 +51,9 @@ func applyRouting(base map[string]any, p *routing.Prepared, mode, server string)
 		{"type": "udp", "tag": "dns-local", "server": "1.1.1.1", "detour": "direct"},
 	}
 	if mode == "tun" {
+		// The system stack keys TCP NAT by source alone. gVisor keeps different
+		// destinations separate when clients reuse a source port across FakeIPs.
+		base["inbounds"].([]map[string]any)[0]["stack"] = "gvisor"
 		if p.FakeIPPath == "" {
 			return fmt.Errorf("missing persistent FakeIP cache path")
 		}

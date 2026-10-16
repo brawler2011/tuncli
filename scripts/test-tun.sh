@@ -32,7 +32,11 @@ cleanup() {
     [[ -z $fixture_pid ]] || kill "$fixture_pid" 2>/dev/null || true
     [[ -z $client_pid ]] || wait "$client_pid" 2>/dev/null || true
     [[ -z $fixture_pid ]] || wait "$fixture_pid" 2>/dev/null || true
-    cat "$TUN_SMOKE_DIR"/*.log 2>/dev/null || true
+    if [[ $status == 0 ]]; then
+        cat "$TUN_SMOKE_DIR/client.log" "$TUN_SMOKE_DIR/fixture.log"
+    else
+        cat "$TUN_SMOKE_DIR"/*.log 2>/dev/null || true
+    fi
     rm -rf -- "$TUN_SMOKE_DIR"
     exit "$status"
 }

@@ -76,8 +76,8 @@ TLS certificate settings are substituted.
 It asserts A/AAAA FakeIP responses over both UDP and TCP DNS, IPv4/IPv6 traffic
 capture, TCP/UDP routing through direct versus Shadowsocks paths, personal and
 preset priority, both default routes, and real DNS selection. It verifies DNS
-resolver paths and data connection sources at the fixture servers, and reconnects
-to saved FakeIPs after restarting sing-box **before querying DNS again**.
+resolver paths and data connection sources at the fixture servers, checks source-port reuse across different domain destinations, and reconnects
+to saved FakeIPs after restarting the sing-box process **before re-querying those domains**. Failed runs include detailed engine logs.
 
 Requirements: Linux, `/dev/net/tun`, `ip` (iproute2), `unshare` (util-linux),
 GNU `timeout`, and either unprivileged user/network namespaces or passwordless
@@ -230,7 +230,13 @@ Upstream has a [daily build](https://github.com/SagerNet/sing-geosite/blob/main/
 Membership can change upstream; tuncli does not maintain a separate domain database.
 `routing show` reports routes, source URLs, verification times, hashes, and cache state.
 
-With an active TUN policy, client DNS A/AAAA requests receive FakeIP addresses
+With an active TUN policy, the gVisor stack keeps connections to different
+domains separate when clients reuse a source port. Builds must include
+`with_gvisor`, as all Makefile and release builds do. A checked-in patch to
+`sing v0.8.10` keys UDP NAT by both source and destination, preventing a socket
+sending to several domains from inheriting its first route. Patch provenance
+and changed files are documented in `third_party/sing/TUNCLI_PATCH.md`.
+Client DNS A/AAAA requests receive FakeIP addresses
 from `198.18.0.0/15` and `fc00::/18`. The TUN interface also captures IPv6.
 TCP and UDP DNS on port 53 are intercepted. sing-box restores the domain before
 routing and resolves real addresses with the same ordered policy: direct domains
