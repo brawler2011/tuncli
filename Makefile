@@ -10,12 +10,14 @@ DESTDIR ?=
 BUILD_TAGS := with_gvisor,with_dhcp,with_wireguard,with_utls,with_clash_api,with_quic,with_grpc,with_v2ray_api
 GO_FILES := $(shell find cmd pkg -type f -name '*.go') main.go
 
-.PHONY: help build test vet lint fmt fmt-check check release install clean
+.PHONY: help build test vet lint fmt fmt-check check check-all test-tun release install clean
 
 help:
 	@printf '%s\n' \
 	  'build      Build build/tuncli (default)' \
-	  'test       Run all Go tests' \
+	  'test       Run all unprivileged Go tests' \
+	  'test-tun   Run real TUN tests in isolated Linux network namespaces' \
+	  'check-all  Run check plus real TUN tests (requires Linux TUN)' \
 	  'vet        Run go vet' \
 	  'lint       Run golangci-lint' \
 	  'fmt        Format Go sources' \
@@ -32,11 +34,18 @@ build:
 test:
 	$(GO) test -timeout 2m -tags '$(BUILD_TAGS)' ./...
 
+test-tun:
+	mkdir -p "$(BUILD_DIR)"
+	$(GO) test -c -tags '$(BUILD_TAGS),tun_smoke' -o "$(BUILD_DIR)/tun-smoke.test" ./pkg/runner
+	bash scripts/test-tun.sh "$(BUILD_DIR)/tun-smoke.test"
+
+check-all: check test-tun
+
 vet:
 	$(GO) vet -tags '$(BUILD_TAGS)' ./...
 
 lint:
-	$(GOLANGCI_LINT) run --build-tags '$(BUILD_TAGS)' ./...
+	$(GOLANGCI_LINT) run --build-tags '$(BUILD_TAGS),tun_smoke' ./...
 
 fmt:
 	gofmt -w $(GO_FILES)

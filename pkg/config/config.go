@@ -2,6 +2,9 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
+	"github.com/brawler2011/tuncli/pkg/routing"
+	"github.com/brawler2011/tuncli/pkg/storage"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -15,6 +18,7 @@ type SubscriptionItem struct {
 }
 
 type Config struct {
+	Routing              *routing.Policy    `json:"routing,omitempty"`
 	Mode                 string             `json:"mode"`
 	SelectedSubscription string             `json:"selected_subscription"` // ID of the subscription/server
 	SelectedNode         string             `json:"selected_node"`         // Name of the node
@@ -45,7 +49,7 @@ func GetConfigDir() (string, error) {
 		}
 	}
 	dir := filepath.Join(home, ".config", "tuncli")
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := storage.Mkdir(dir); err != nil {
 		return "", err
 	}
 	return dir, nil
@@ -65,7 +69,7 @@ func GetSubscriptionsDir() (string, error) {
 		return "", err
 	}
 	subDir := filepath.Join(dir, "subscriptions")
-	if err := os.MkdirAll(subDir, 0755); err != nil {
+	if err := storage.Mkdir(subDir); err != nil {
 		return "", err
 	}
 	return subDir, nil
@@ -107,7 +111,7 @@ func SaveSubscriptionNodes(id string, nodes []Node) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, data, 0644)
+	return storage.Write(path, data)
 }
 
 func DeleteSubscriptionNodes(id string) error {
@@ -145,6 +149,10 @@ func LoadConfig() (*Config, error) {
 	err = json.Unmarshal(data, &cfg)
 	if err != nil {
 		return nil, err
+	}
+
+	if err := cfg.Routing.Validate(); err != nil {
+		return nil, fmt.Errorf("routing: %w", err)
 	}
 
 	// Migrate legacy config if needed
@@ -192,6 +200,9 @@ func migrateConfig(cfg *Config) error {
 }
 
 func SaveConfig(cfg *Config) error {
+	if err := cfg.Routing.Validate(); err != nil {
+		return fmt.Errorf("routing: %w", err)
+	}
 	path, err := GetConfigPath()
 	if err != nil {
 		return err
@@ -202,7 +213,7 @@ func SaveConfig(cfg *Config) error {
 		return err
 	}
 
-	return os.WriteFile(path, data, 0644)
+	return storage.Write(path, data)
 }
 
 func getHomeDir() string {

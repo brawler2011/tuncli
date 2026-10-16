@@ -27,6 +27,11 @@ jobs:
       - name: Check
         run: make check
 
+      - name: Test real TUN routing
+        run: |
+          test -c /dev/net/tun || sudo modprobe tun
+          make test-tun
+
       - name: Build and Package Assets
         run: make release
 
