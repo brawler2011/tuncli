@@ -77,7 +77,8 @@ It asserts A/AAAA FakeIP responses over both UDP and TCP DNS, IPv4/IPv6 traffic
 capture, TCP/UDP routing through direct versus Shadowsocks paths, personal and
 preset priority, both default routes, and real DNS selection. It verifies DNS
 resolver paths and data connection sources at the fixture servers, and reconnects
-to saved FakeIPs after restarting sing-box **before querying DNS again**.
+to saved FakeIPs after restarting sing-box **before re-querying those domains**. A bounded DNS
+readiness probe precedes each run; failed runs include detailed engine logs.
 
 Requirements: Linux, `/dev/net/tun`, `ip` (iproute2), `unshare` (util-linux),
 GNU `timeout`, and either unprivileged user/network namespaces or passwordless

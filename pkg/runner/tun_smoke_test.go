@@ -200,7 +200,7 @@ func TestTUNSmoke(t *testing.T) {
 				node.RawConfig["password"] = smokePassword
 				opts, err := BuildSingboxConfigWithPolicy(ctx, node, "tun", prepared)
 				require.NoError(t, err)
-				opts.Log = &option.LogOptions{Level: "error", DisableColor: true}
+				opts.Log = &option.LogOptions{Level: "debug", DisableColor: true, Output: filepath.Join(dir, fmt.Sprintf("engine-%s-%d.log", def, restart))}
 				// Only fixture addresses and its test TLS certificate differ from production.
 				opts.DNS.Servers[0].Options.(*option.RemoteHTTPSDNSServerOptions).Server = "192.0.2.2"
 				opts.DNS.Servers[0].Options.(*option.RemoteHTTPSDNSServerOptions).ServerPort = 8443
@@ -213,6 +213,7 @@ func TestTUNSmoke(t *testing.T) {
 				// Close even after a failed assertion so later namespace cleanup cannot hang.
 				func() {
 					defer func() { assert.NoError(t, instance.Close()) }()
+					waitTUNDNS(t)
 					iface, err := net.InterfaceByName("tuncli-tun0")
 					require.NoError(t, err)
 					addresses, err := iface.Addrs()
@@ -319,4 +320,29 @@ func smokeTransfer(t *testing.T, fake string, want routing.Outbound) {
 	require.NoError(t, err, "UDP %s", fake)
 	require.NoError(t, conn.Close())
 	assert.Equal(t, string(want), string(buffer[:n]), "UDP %s", fake)
+}
+
+// Kernel routes and the TUN reader can become usable after Start returns,
+// especially when rapidly recreating an interface. Wait for end-to-end DNS
+// readiness once per start; the actual assertions still use single requests.
+func waitTUNDNS(t *testing.T) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		request := new(dns.Msg)
+		request.SetQuestion("tuncli-readiness.invalid.", dns.TypeA)
+		response, _, err := (&dns.Client{Net: "udp", Timeout: 250 * time.Millisecond}).Exchange(request, "203.0.113.53:53")
+		if err == nil && len(response.Answer) == 1 {
+			if answer, ok := response.Answer[0].(*dns.A); ok && netip.MustParsePrefix("198.18.0.0/15").Contains(netip.MustParseAddr(answer.A.String())) {
+				return
+			}
+		}
+		if err == nil {
+			err = fmt.Errorf("expected FakeIP readiness response, got %v", response)
+		}
+		lastErr = err
+		time.Sleep(25 * time.Millisecond)
+	}
+	require.NoError(t, lastErr, "TUN DNS did not become ready within 5 seconds")
 }
