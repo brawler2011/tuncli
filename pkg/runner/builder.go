@@ -119,10 +119,11 @@ func BuildSingboxConfigWithPolicy(ctx context.Context, node *config.Node, mode s
 		},
 	}
 
-	// Inbounds
+	// Keep TUN first: routing setup adjusts its stack and addresses.
+	var inbounds []map[string]any
 	if mode == "tun" {
-		baseConfig["inbounds"] = []map[string]any{
-			{
+		inbounds = append(inbounds,
+			map[string]any{
 				"type":           "tun",
 				"tag":            "tun-in",
 				"interface_name": "tuncli-tun0",
@@ -131,17 +132,15 @@ func BuildSingboxConfigWithPolicy(ctx context.Context, node *config.Node, mode s
 				"strict_route":   true,
 				"stack":          "system",
 			},
-		}
-	} else {
-		baseConfig["inbounds"] = []map[string]any{
-			{
-				"type":        "mixed",
-				"tag":         "mixed-in",
-				"listen":      "127.0.0.1",
-				"listen_port": 2080,
-			},
-		}
+		)
 	}
+	inbounds = append(inbounds, map[string]any{
+		"type":        "mixed",
+		"tag":         "mixed-in",
+		"listen":      "127.0.0.1",
+		"listen_port": 2080,
+	})
+	baseConfig["inbounds"] = inbounds
 
 	// Build outbounds
 	var outbounds []map[string]any

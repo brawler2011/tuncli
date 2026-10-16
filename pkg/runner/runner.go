@@ -151,6 +151,7 @@ func Start(cfg *config.Config) (runErr error) {
 	if err != nil {
 		return fmt.Errorf("failed to start sing-box: %w", err)
 	}
+	fmt.Println("Local proxy: 127.0.0.1:2080 (HTTP/SOCKS5)")
 	fmt.Println("VPN is running. Press Ctrl+C to stop.")
 
 	var xrayDone <-chan struct{}
