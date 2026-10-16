@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/brawler2011/tuncli/pkg/routing"
 	"github.com/brawler2011/tuncli/pkg/sub"
 
 	"github.com/sagernet/sing-box/option"
@@ -17,6 +18,11 @@ import (
 )
 
 func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xrayPort ...int) (option.Options, error) {
+	return BuildSingboxConfigWithPolicy(ctx, node, mode, nil, xrayPort...)
+}
+
+// BuildSingboxConfigWithPolicy is pure: callers prepare rule files and bootstrap IPs.
+func BuildSingboxConfigWithPolicy(ctx context.Context, node *config.Node, mode string, prepared *routing.Prepared, xrayPort ...int) (option.Options, error) {
 	var opts option.Options
 	if node == nil {
 		return opts, fmt.Errorf("node is nil")
@@ -68,15 +74,18 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 			"outbound": "direct",
 		})
 	} else if proxyServer != "" {
-		if ips, err := net.LookupIP(proxyServer); err == nil {
-			for _, ip := range ips {
-				if ipv4 := ip.To4(); ipv4 != nil {
-					proxyIP = ipv4.String()
-					routeRules = append(routeRules, map[string]any{
-						"ip_cidr":  []string{ipv4.String() + "/32"},
-						"outbound": "direct",
-					})
+		if prepared != nil {
+			for _, address := range prepared.ServerIPs {
+				ip := net.ParseIP(address)
+				if ip == nil {
+					return opts, fmt.Errorf("invalid bootstrap IP %q", address)
 				}
+				prefix := "/128"
+				if ip.To4() != nil {
+					prefix = "/32"
+					proxyIP = ip.String()
+				}
+				routeRules = append(routeRules, map[string]any{"ip_cidr": []string{ip.String() + prefix}, "outbound": "direct"})
 			}
 		}
 		routeRules = append(routeRules, map[string]any{
@@ -179,6 +188,11 @@ func BuildSingboxConfig(ctx context.Context, node *config.Node, mode string, xra
 	outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "direct"})
 	baseConfig["outbounds"] = outbounds
 
+	if prepared != nil && prepared.Policy != nil && prepared.Policy.Enabled {
+		if err := applyRouting(baseConfig, prepared, mode, proxyServer); err != nil {
+			return opts, err
+		}
+	}
 	jsonBytes, err := json.MarshalIndent(baseConfig, "", "  ")
 	if err != nil {
 		return opts, err

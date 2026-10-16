@@ -46,7 +46,9 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2
 make help       # List available commands
 make fmt        # Format Go sources
 make lint       # Run golangci-lint, including modernize and testifylint
-make check      # Check formatting, run linters and tests
+make check      # Check formatting, run linters and unprivileged tests
+make test-tun   # Run actual Linux TUN tests in isolated networks
+make check-all  # Run check and test-tun
 make build      # Build locally (also the default for make)
 make release    # Create Linux amd64 and arm64 archives in dist/
 make clean      # Remove build/ and dist/
@@ -59,8 +61,39 @@ Tests use testify: `require` for prerequisites and `assert` for independent chec
 Builds, tests, vet, and linters share the feature tags in the Makefile. CI runs the same
 checks and build for pushes and pull requests; tagged releases run checks before
 packaging and publishing. Release builds disable CGO and require tar.
-Tests do not require root or an active VPN connection. If `xray` is installed,
+The default `make test` suite does not require root or an active VPN connection. If `xray` is installed,
 the runner tests also validate generated Xray configuration with it.
+
+`make test-tun` builds a separate Linux test binary with the `tun_smoke` tag and
+runs it across two temporary network namespaces connected by a virtual Ethernet
+pair. A local Shadowsocks server, UDP DNS resolver, DoH endpoint, HTTP server,
+and UDP echo server provide all test traffic; no subscription, VPN credentials,
+GitHub downloads, or external Internet access are needed during the test.
+The test exercises the production config builder and embedded engine with real
+TUN interfaces and kernel sockets. Only DNS endpoint addresses and the fixture's
+TLS certificate settings are substituted.
+
+It asserts A/AAAA FakeIP responses over both UDP and TCP DNS, IPv4/IPv6 traffic
+capture, TCP/UDP routing through direct versus Shadowsocks paths, personal and
+preset priority, both default routes, and real DNS selection. It verifies DNS
+resolver paths and data connection sources at the fixture servers, and reconnects
+to saved FakeIPs after restarting sing-box **before querying DNS again**.
+
+Requirements: Linux, `/dev/net/tun`, `ip` (iproute2), `unshare` (util-linux),
+GNU `timeout`, and either unprivileged user/network namespaces or passwordless
+sudo. The script uses user namespaces when available and otherwise runs only
+its isolated network setup and test binary through `sudo -n`. Go builds run as
+the invoking user. Missing capabilities fail the command; tests are not silently
+skipped. Host routes and saved tuncli settings are untouched. Processes, links,
+namespaces and scratch files are cleaned up on exit, including test failures;
+the run has a hard timeout.
+
+GitHub Actions runs `make test-tun` in a dedicated `ubuntu-24.04` VM job on pushes
+and pull requests, and before packaging tagged releases. The workflow checks
+TUN availability and loads the module if necessary. An ordinary container runner
+must explicitly provide `/dev/net/tun`, network administration capabilities and
+permission to create nested network namespaces; a default restricted container
+will fail this job. Locally, run `make check-all` for both suites.
 
 Override `GO`, `BUILD_DIR`, or `DIST_DIR` when needed, for example
 `make build GO=/path/to/go BUILD_DIR=build/debug`. `make clean` only accepts
@@ -140,3 +173,111 @@ Settings are stored at:
 
 > [!NOTE]
 > When run with `sudo` or `doas`, `tuncli` automatically resolves the original user (`SUDO_USER` / `DOAS_USER`) to read and write config files from/to their home directory rather than the root user's home.
+
+## Split routing
+
+Routing policies are optional. Without an enabled policy, the existing VPN and
+DNS behavior is preserved. Settings are applied at the **next VPN start**;
+restart an active connection after changing settings or updating lists.
+
+```bash
+tuncli routing preset list
+tuncli routing preset enable ru --outbound direct
+tuncli routing preset enable ai --outbound vpn
+tuncli routing rule add my.itmo.ru --outbound direct
+tuncli routing rule add example.com --suffix --outbound vpn
+tuncli routing default vpn
+tuncli routing show
+tuncli routing update
+tuncli routing preset disable ru
+tuncli routing rule remove my.itmo.ru
+tuncli routing rule remove example.com --suffix
+tuncli routing disable
+tuncli routing enable
+```
+
+Enabling a preset, adding a personal rule, or setting the default enables the
+policy. `disable` retains all settings. The initial default is `vpn`; both
+`vpn` and `direct` are accepted for every route. `vpn` uses the selected server,
+including the Xray sidecar for XHTTP. Presets can be enabled together; omitting
+`--outbound` for a preset uses its recommendation.
+
+Rules are evaluated in this order:
+
+1. DNS interception and VPN server connection exceptions.
+2. Personal rules: exact domains first, then suffixes from most to least specific.
+3. All VPN presets.
+4. All direct presets.
+5. The explicit default.
+
+Preset enable order has no effect. Suffix rules include the domain itself and
+its subdomains. Adding the same domain and rule type replaces its route;
+exact and suffix rules can coexist. Domains are lowercased, converted to IDNA,
+and stripped of a trailing dot. URLs, IP addresses, wildcards, and invalid
+hostnames are rejected; use `--suffix` for subdomains.
+
+Lists come from [SagerNet/sing-geosite](https://github.com/SagerNet/sing-geosite),
+using its ready-made binary rule sets:
+
+| Preset | Binary file | Recommended route | Coverage |
+| --- | --- | --- | --- |
+| `ru` | `geosite-category-ru.srs` | `direct` | Broad Russian category, including the entire `.ru` zone |
+| `ai` | `geosite-category-ai-!cn.srs` | `vpn` | AI services outside the China category, including Google DeepMind/Gemini |
+
+The source URL is
+`https://raw.githubusercontent.com/SagerNet/sing-geosite/rule-set/`.
+Upstream has a [daily build](https://github.com/SagerNet/sing-geosite/blob/main/.github/workflows/release.yaml).
+Membership can change upstream; tuncli does not maintain a separate domain database.
+`routing show` reports routes, source URLs, verification times, hashes, and cache state.
+
+With an active TUN policy, client DNS A/AAAA requests receive FakeIP addresses
+from `198.18.0.0/15` and `fc00::/18`. The TUN interface also captures IPv6.
+TCP and UDP DNS on port 53 are intercepted. sing-box restores the domain before
+routing and resolves real addresses with the same ordered policy: direct domains
+use a direct UDP resolver at `1.1.1.1`, VPN domains use Cloudflare DoH through the
+VPN. DNS final follows the policy default. VPN server bootstrap remains direct.
+Internal lookups skip FakeIP, and resolver caches are independent. FakeIP mappings
+persist in `~/.config/tuncli/routing/fakeip.db` across normal restarts.
+
+Proxy mode does not enable FakeIP; rules apply to domain names supplied by HTTP
+or SOCKS clients. Applications using their own DoH or known IP addresses may
+bypass domain matching. For predictable TUN routing, configure applications to
+use system DNS intercepted by tuncli, and disable their private DNS/DoH.
+
+Verified lists and metadata are stored in `~/.config/tuncli/routing/`, under the
+original user's home even with sudo/doas. Settings are written atomically, and
+files created through privilege elevation remain accessible to that user.
+At startup, enabled lists older than 24 hours are refreshed over HTTPS with a
+20-second timeout and 16 MiB size limit. Files are parsed and checked by the
+pinned sing-box version before publication. Updates are locked and atomic;
+binary paths contain SHA-256 hashes, so an update does not replace a running
+process's list. No background refresh changes a running connection.
+
+If refresh fails, startup warns and uses the last verified copy. With no valid
+copy, startup fails before creating TUN. `routing update` forces refresh of all
+configured presets (even while the policy is disabled), returns a nonzero status
+on any failure, and reports retained copies. Restore network access and retry
+`routing update`; `routing disable` temporarily restores the original routing.
+Old hash files are retained for running processes; remove unused copies only
+while all tuncli instances are stopped.
+
+### Manual Linux TUN smoke test
+
+On a Linux host with working IPv4/IPv6 and a selected VPN node:
+
+1. Enable `ru -> direct`, `ai -> vpn`, `my.itmo.ru -> direct`, and default `vpn`.
+   Run `tuncli routing update`, then `sudo tuncli start`.
+2. Check `ip address show tuncli-tun0` for IPv4 and IPv6. Query A and AAAA using
+   system DNS for `ozon.ru`, `gosuslugi.ru`, `gemini.google.com`, and `my.itmo.ru`;
+   expect FakeIP ranges. Repeat a DNS query over TCP (`dig +tcp`).
+3. With application private DNS disabled, connect to these domains. Use packet
+   capture on the physical interface to verify direct connections for Russian
+   domains and ITMO, and the VPN connection for Gemini and unknown domains.
+   Verify direct DNS uses UDP/53, while VPN DNS travels inside the VPN.
+4. Stop normally, restart, and verify previously returned FakeIPs still recover
+   their domains. Repeat with default `direct`, and with an XHTTP node if available.
+5. Make an enabled list stale, block list downloads, and restart: expect a warning
+   and cached rules. With no verified copy, expect failure before TUN creation.
+   Restore downloads and run `routing update` to recover.
+6. Disable the policy and restart. Confirm the original DNS and routing behavior.
+   Test proxy mode separately with `curl --socks5-hostname 127.0.0.1:2080 ...`.
