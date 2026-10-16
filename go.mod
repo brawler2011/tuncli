@@ -88,3 +88,6 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	lukechampine.com/blake3 v1.3.0 // indirect
 )
+
+// Destination-aware UDP NAT fix; see third_party/sing/TUNCLI_PATCH.md.
+replace github.com/sagernet/sing => ./third_party/sing
