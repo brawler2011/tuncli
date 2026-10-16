@@ -16,6 +16,7 @@ func TestManagedMarksAndBootstrap(t *testing.T) {
 			node := &config.Node{Name: "test", Protocol: "shadowsocks", Server: "192.0.2.1", Port: 443, RawConfig: map[string]any{"type": "ss", "server": "192.0.2.1", "port": 443, "cipher": "aes-128-gcm", "password": "test"}}
 			options, err := BuildSingboxConfigWithPolicy(singboxContext(context.Background()), node, mode, &routing.Prepared{Managed: true})
 			require.NoError(t, err)
+			assertLocalProxy(t, options, mode)
 			marks := map[string]option.FwMark{}
 			for _, out := range options.Outbounds {
 				dialer, ok := out.Options.(option.DialerOptionsWrapper)

@@ -161,8 +161,12 @@ local API and apply immediately to a running VPN; a stopped VPN stays stopped.
 Subscription updates reconnect only when the selected node changes. If that node
 disappears, the update fails and preserves the previous subscription.
 
-Proxy mode serves HTTP/SOCKS at `127.0.0.1:2080` and leaves system internet
-unblocked. Status explicitly reports this. If the service is unavailable, management
+Both TUN and proxy modes serve a local HTTP/SOCKS5 proxy at `127.0.0.1:2080`
+while connected, using the selected node and the same routing rules. In Telegram,
+select SOCKS5, set server `127.0.0.1` and port `2080`, and leave username and
+password empty. The proxy listens only on this computer and stops with the VPN.
+Proxy mode leaves system internet unblocked. Status reports the proxy address.
+If the service is unavailable, management
 commands return an error. They never start a second VPN.
 
 For a foreground session on Linux without systemd, before installing a service:

@@ -13,7 +13,8 @@ shared host. Build with `make check-all && make build` first.
 2. Without sudo, exercise `status --json`, `logs`, `logs -f`, `select`, subscriptions,
    routing changes, `start --node/--mode`, `restart`, and `stop`. A stopped VPN must
    stay stopped while settings change; `restart` must report an error. Verify
-   `127.0.0.1:2080` in proxy mode and that normal system traffic is unblocked.
+   HTTP and SOCKS5 at `127.0.0.1:2080` in both modes, including after restart;
+   the listener must close on stop. In proxy mode, normal system traffic is unblocked.
 3. From the other user, run status/start/stop and attempt to read the Unix socket
    directly: all requests must return permission denied. Root must retain access.
    Check that raw engine options, executable paths and unknown operation names

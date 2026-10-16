@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -238,6 +239,7 @@ func TestTUNSmoke(t *testing.T) {
 					}
 
 					for _, tc := range cases {
+						smokeLocalProxy(t, tc.domain, tc.route)
 						for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
 							var fake string
 							var previous string
@@ -305,6 +307,22 @@ func TestTUNSmoke(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "dns.jsonl"), nil, 0600))
 			}
 		})
+	}
+}
+
+func smokeLocalProxy(t *testing.T, domain string, want routing.Outbound) {
+	t.Helper()
+	for _, scheme := range []string{"http", "socks5"} {
+		proxyURL := &url.URL{Scheme: scheme, Host: "127.0.0.1:2080"}
+		transport := &http.Transport{Proxy: http.ProxyURL(proxyURL), DisableKeepAlives: true}
+		client := &http.Client{Transport: transport, Timeout: 4 * time.Second}
+		response, err := client.Get("http://" + net.JoinHostPort(domain, "8080") + "/")
+		require.NoError(t, err, "%s proxy: %s", scheme, domain)
+		body, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		transport.CloseIdleConnections()
+		assert.Equal(t, string(want), string(body), "%s proxy route: %s", scheme, domain)
 	}
 }
 

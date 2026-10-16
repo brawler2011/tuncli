@@ -140,8 +140,11 @@ func init() {
 			return json.NewEncoder(cmd.OutOrStdout()).Encode(s)
 		}
 		cmd.Printf("State: %s\nDesired: %t\nNode: %s\nMode: %s\nProtection: %t\n", s.State, s.Desired, s.Node, s.Mode, s.Protection)
-		if s.Mode == "proxy" {
+		switch s.Mode {
+		case "proxy":
 			cmd.Println("Proxy: 127.0.0.1:2080; system internet is not blocked")
+		case "tun":
+			cmd.Println("Proxy: 127.0.0.1:2080 (HTTP/SOCKS5, available while connected)")
 		}
 		if s.LastError != "" {
 			cmd.Println("Last error:", s.LastError)

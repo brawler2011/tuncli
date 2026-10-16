@@ -53,9 +53,13 @@ func TestRoutingLegacyAndModes(t *testing.T) {
 			disabled, err := BuildSingboxConfigWithPolicy(ctx, routingNode(), mode, p)
 			require.NoError(t, err)
 			assert.Equal(t, legacy, disabled)
+			for _, built := range []option.Options{legacy, disabled} {
+				assertLocalProxy(t, built, mode)
+			}
 			p.Policy.Enabled = true
 			opts, err := BuildSingboxConfigWithPolicy(ctx, routingNode(), mode, p)
 			require.NoError(t, err)
+			assertLocalProxy(t, opts, mode)
 			assert.True(t, opts.DNS.IndependentCache)
 			assert.Equal(t, "proxy", opts.Route.Final)
 			assert.Len(t, opts.Route.RuleSet, 2)
@@ -71,10 +75,31 @@ func TestRoutingLegacyAndModes(t *testing.T) {
 			node := &config.Node{Protocol: "vless", Server: "192.0.2.1", RawConfig: map[string]any{"type": "vless", "server": "192.0.2.1", "port": 443, "uuid": "00000000-0000-4000-8000-000000000001", "network": "xhttp"}}
 			opts, err = BuildSingboxConfigWithPolicy(ctx, node, mode, p, 12345)
 			require.NoError(t, err)
+			assertLocalProxy(t, opts, mode)
 			assert.Equal(t, "socks", opts.Outbounds[0].Type)
 			assert.Equal(t, "proxy", opts.Route.Final)
 		})
 	}
+}
+
+func assertLocalProxy(t *testing.T, opts option.Options, mode string) {
+	t.Helper()
+	want := 1
+	if mode == "tun" {
+		want = 2
+		require.NotEmpty(t, opts.Inbounds)
+		assert.Equal(t, "tun", opts.Inbounds[0].Type)
+	}
+	require.Len(t, opts.Inbounds, want)
+	inbound := opts.Inbounds[want-1]
+	assert.Equal(t, "mixed", inbound.Type)
+	assert.Equal(t, "mixed-in", inbound.Tag)
+	mixed, ok := inbound.Options.(*option.HTTPMixedInboundOptions)
+	require.True(t, ok)
+	require.NotNil(t, mixed.Listen)
+	assert.Equal(t, netip.MustParseAddr("127.0.0.1"), netip.Addr(*mixed.Listen))
+	assert.Equal(t, uint16(2080), mixed.ListenPort)
+	assert.Empty(t, mixed.Users)
 }
 
 // Run the actual embedded engine without TUN or listening inbounds. Only real
