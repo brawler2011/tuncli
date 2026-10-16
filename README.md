@@ -47,8 +47,9 @@ make help       # List available commands
 make fmt        # Format Go sources
 make lint       # Run golangci-lint, including modernize and testifylint
 make check      # Check formatting, run linters and unprivileged tests
+make test-guard # Test IPv4/IPv6/DNS leak protection in isolated networks
 make test-tun   # Run actual Linux TUN tests in isolated networks
-make check-all  # Run check and test-tun
+make check-all  # Run check, test-guard and test-tun
 make build      # Build locally (also the default for make)
 make release    # Create Linux amd64 and arm64 archives in dist/
 make clean      # Remove build/ and dist/
@@ -126,59 +127,96 @@ Interactively select the connection mode (`tun` or `proxy`) and a server:
 tuncli select
 ```
 
-### 3. Start VPN
+### 3. Install the background service
 
-Start the connection:
+On a systemd Linux laptop, install nftables and prepare the node selection above,
+then run once:
 
 ```bash
-sudo tuncli start
+sudo tuncli service install
 ```
 
-For a single launch, override the mode or select a node by its exact name:
+The service imports and validates the calling user's configuration, subscriptions,
+HWID and routing cache without modifying the originals. It copies the daemon to
+`/usr/local/libexec/tuncli/tuncli` and enables boot-time connection before login.
+The service and `/usr/bin/xray` (for XHTTP/SplitHTTP) must have root-owned,
+non-user-writable executable paths. Xray is installed separately.
+
+After installation, the owner and root manage the laptop-wide VPN without sudo:
 
 ```bash
+tuncli status             # State, desired state, node, mode, protection, last error
+tuncli status --json
+tuncli logs -f
+tuncli stop               # Restore internet; stay stopped after reboot
+tuncli start              # Connect in background; enable connection after reboot
+tuncli restart            # Reconnect; returns an error if stopped
 tuncli start --mode proxy --node "My node"
+tuncli select             # Save and immediately apply a node/mode selection
 ```
 
-These flags do not change the saved selection. If names repeat, the selected
-subscription is searched first, then the other subscriptions in saved order.
-Proxy mode listens on `127.0.0.1:2080` (HTTP and SOCKS).
+`start --node/--mode` saves the choice. Duplicate node names are searched in the
+selected subscription first. Changes to subscriptions and routing go through the
+local API and apply immediately to a running VPN; a stopped VPN stays stopped.
+Subscription updates reconnect only when the selected node changes. If that node
+disappears, the update fails and preserves the previous subscription.
 
-Stop the connection from another terminal using the same user and privilege
-level as `start`:
+Proxy mode serves HTTP/SOCKS at `127.0.0.1:2080` and leaves system internet
+unblocked. Status explicitly reports this. If the service is unavailable, management
+commands return an error. They never start a second VPN.
+
+For a foreground session on Linux without systemd, before installing a service:
 
 ```bash
-sudo tuncli stop  # For a connection started with sudo
-# tuncli stop     # For a connection started as a regular user
+sudo tuncli run                 # TUN; Ctrl+C stops the session
+tuncli run --mode proxy         # Does not require root
 ```
 
-Only one instance per effective user can run at a time. Runtime state is locked
-in `/tmp/tuncli-<effective-uid>/` with private permissions. Stopping requires
-Linux pidfd support (kernel 5.3 or newer); Ctrl+C also stops the foreground process.
+### Protection and recovery
 
-XHTTP and SplitHTTP nodes require an external `xray` executable, installed at
-`/usr/bin/xray` or available in `PATH`. Other transports use the embedded sing-box
-engine. Xray starts and stops with the VPN; it is not bundled in release archives.
+Managed TUN requires nftables. A dedicated `inet tuncli_guard` table protects
+IPv4 and IPv6 before TUN creation; a separate early systemd unit runs before
+`network-pre.target`. Only loopback, DHCP/IPv6 link maintenance, TUN output,
+marked VPN transport and bootstrap DNS to `1.1.1.1:53` are allowed while connecting.
+Configured direct traffic is allowed through the engine only after a successful
+HTTPS probe through the VPN. Probes run every 10 seconds with a 5-second timeout;
+two consecutive failures close direct access and trigger retries with delays
+from 1 to 30 seconds. No automatic server selection is performed.
 
-> [!IMPORTANT]
-> Running in **TUN** mode requires root privileges (`sudo`) to configure the virtual network interface. **Proxy** mode can be run as a regular user.
+Process crashes and systemd restarts leave protection in the kernel. An explicit
+`stop` persists the disabled state, closes the engine and Xray, then removes only
+tuncli's table. Settings changes are serialized, validated before disconnecting,
+and rolled back on launch failure. A transaction journal restores interrupted
+settings updates after a crash. Foreign nftables tables are never flushed.
 
----
+```bash
+sudo tuncli service recover     # Persist stopped, stop daemon, remove its rules
+sudo tuncli service uninstall   # Also disable/remove units and private executable
+```
+
+Uninstall retains `/var/lib/tuncli` as a root-only settings export. Move it to a
+backup location before a fresh installation. `recover` is intended for a broken
+control socket; ordinary stop requires no sudo.
 
 ## Configuration
 
-Settings are stored at:
+Before installation, local preparation uses `~/.config/tuncli/config.json` and
+subscription caches. With sudo, foreground mode resolves the original user's home.
+After installation, `/var/lib/tuncli` is the only active settings source and stores
+subscriptions, routing cache and FakeIP database with root-only permissions. The
+CLI uses `/run/tuncli/control.sock`; Linux `SO_PEERCRED` restricts operations to the
+installation owner and root. There is no remote listener or raw engine-config API.
+The owner's UID is recorded in `/etc/tuncli-owner.json`.
 
-- `~/.config/tuncli/config.json`
-
-> [!NOTE]
-> When run with `sudo` or `doas`, `tuncli` automatically resolves the original user (`SUDO_USER` / `DOAS_USER`) to read and write config files from/to their home directory rather than the root user's home.
+macOS, Windows, other init systems in background mode, and per-user VPN isolation
+are outside this version. Foreground `run` does not provide the managed nftables
+protection described above.
 
 ## Split routing
 
 Routing policies are optional. Without an enabled policy, the existing VPN and
-DNS behavior is preserved. Settings are applied at the **next VPN start**;
-restart an active connection after changing settings or updating lists.
+DNS behavior is preserved. With the service installed, settings apply immediately
+to a running VPN. Before installation, changes are saved for the next foreground run.
 
 ```bash
 tuncli routing preset list
@@ -243,7 +281,8 @@ routing and resolves real addresses with the same ordered policy: direct domains
 use a direct UDP resolver at `1.1.1.1`, VPN domains use Cloudflare DoH through the
 VPN. DNS final follows the policy default. VPN server bootstrap remains direct.
 Internal lookups skip FakeIP, and resolver caches are independent. FakeIP mappings
-persist in `~/.config/tuncli/routing/fakeip.db` across normal restarts.
+persist in `/var/lib/tuncli/routing/fakeip.db` for the service (or
+`~/.config/tuncli/routing/fakeip.db` in foreground mode) across normal restarts.
 
 Proxy mode does not enable FakeIP; rules apply to domain names supplied by HTTP
 or SOCKS clients. Applications using their own DoH or known IP addresses may
@@ -251,7 +290,8 @@ bypass domain matching. For predictable TUN routing, configure applications to
 use system DNS intercepted by tuncli, and disable their private DNS/DoH.
 
 Verified lists and metadata are stored in `~/.config/tuncli/routing/`, under the
-original user's home even with sudo/doas. Settings are written atomically, and
+original user's home for foreground mode; managed mode uses
+`/var/lib/tuncli/routing/`. Settings are written atomically, and
 files created through privilege elevation remain accessible to that user.
 At startup, enabled lists older than 24 hours are refreshed over HTTPS with a
 20-second timeout and 16 MiB size limit. Files are parsed and checked by the
@@ -272,7 +312,7 @@ while all tuncli instances are stopped.
 On a Linux host with working IPv4/IPv6 and a selected VPN node:
 
 1. Enable `ru -> direct`, `ai -> vpn`, `my.itmo.ru -> direct`, and default `vpn`.
-   Run `tuncli routing update`, then `sudo tuncli start`.
+   Run `tuncli routing update`, then `tuncli start`.
 2. Check `ip address show tuncli-tun0` for IPv4 and IPv6. Query A and AAAA using
    system DNS for `ozon.ru`, `gosuslugi.ru`, `gemini.google.com`, and `my.itmo.ru`;
    expect FakeIP ranges. Repeat a DNS query over TCP (`dig +tcp`).
@@ -287,3 +327,14 @@ On a Linux host with working IPv4/IPv6 and a selected VPN node:
    Restore downloads and run `routing update` to recover.
 6. Disable the policy and restart. Confirm the original DNS and routing behavior.
    Test proxy mode separately with `curl --socks5-hostname 127.0.0.1:2080 ...`.
+
+## Service verification
+
+`make test-guard` uses isolated network namespaces and local TCP/UDP fixtures to
+check IPv4/IPv6 and DNS blocking, separate transport/direct/bootstrap marks,
+direct access only while connected, persistence after SIGKILL, foreign-table
+preservation and internet restoration after stop. It needs nftables, iproute2,
+util-linux, and user/network namespaces or passwordless sudo, without TUN or
+external internet. `make check-all` includes these checks and the existing real
+TUN routing suite. See [the systemd VM checklist](docs/systemd-vm.md) for the
+boot/login, cgroup, ownership and recovery acceptance checks.

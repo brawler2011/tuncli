@@ -85,7 +85,7 @@ var addCmd = &cobra.Command{
 			}
 		}
 
-		fmt.Printf("Fetching/parsing node data from %s...\n", link)
+		cmd.Println("Fetching/parsing node data...")
 		fetchedNodes, err := sub.FetchAndParse(link)
 		if err != nil {
 			return fmt.Errorf("failed to add: failed to fetch or parse link: %w", err)

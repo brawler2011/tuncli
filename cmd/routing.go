@@ -12,7 +12,7 @@ import (
 )
 
 func newRoutingCommand() *cobra.Command {
-	root := &cobra.Command{Use: "routing", Short: "Manage persistent domain routing (applied on next VPN start)"}
+	root := &cobra.Command{Use: "routing", Short: "Manage domain routing (applied immediately by the service)"}
 	change := func(fn func(*routing.Policy, []string, *cobra.Command) error) func(*cobra.Command, []string) error {
 		return func(cmd *cobra.Command, args []string) error {
 			cfg, err := config.LoadConfig()
@@ -31,7 +31,7 @@ func newRoutingCommand() *cobra.Command {
 			if err = config.SaveConfig(cfg); err != nil {
 				return err
 			}
-			cmd.Println("Routing settings saved. Restart VPN to apply changes.")
+			routingSaved(cmd, "Routing settings saved.")
 			return nil
 		}
 	}
@@ -174,7 +174,7 @@ func newRoutingCommand() *cobra.Command {
 				cmd.Printf("Cache: %s, checked=%s, SHA-256=%s\n", fresh, record.Checked.Format(time.RFC3339), record.SHA256)
 			}
 		}
-		cmd.Println("Changes apply on next VPN start.")
+		routingSaved(cmd, "Settings shown.")
 		return nil
 	}})
 	root.AddCommand(&cobra.Command{Use: "update", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
@@ -199,9 +199,17 @@ func newRoutingCommand() *cobra.Command {
 		if err != nil {
 			return errors.Join(errors.New("routing update failed; previous verified copies retained where available"), err)
 		}
-		cmd.Println("Routing lists updated. Restart VPN to apply changes.")
+		routingSaved(cmd, "Routing lists updated.")
 		return nil
 	}})
 	return root
 }
 func init() { rootCmd.AddCommand(newRoutingCommand()) }
+
+func routingSaved(cmd *cobra.Command, message string) {
+	if config.Directory != "" {
+		cmd.Println(message, "Applied to the running VPN; a stopped VPN stays stopped.")
+	} else {
+		cmd.Println(message, "Changes apply on next VPN start.")
+	}
+}

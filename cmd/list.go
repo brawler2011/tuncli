@@ -36,6 +36,9 @@ var listCmd = &cobra.Command{
 			}
 
 			urlStr := item.URL
+			if config.Directory != "" {
+				urlStr = "(stored by service)"
+			}
 			if len(urlStr) > 60 {
 				urlStr = urlStr[:57] + "..."
 			}

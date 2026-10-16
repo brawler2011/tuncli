@@ -193,6 +193,42 @@ func BuildSingboxConfigWithPolicy(ctx context.Context, node *config.Node, mode s
 			return opts, err
 		}
 	}
+	if prepared != nil && prepared.Managed {
+		for _, outbound := range outbounds {
+			if outbound["tag"] == "proxy" {
+				switch outbound["type"] {
+				case "socks", "http", "shadowsocks", "vmess", "vless", "trojan", "hysteria", "hysteria2":
+				default:
+					return opts, fmt.Errorf("unsupported managed VPN protocol %v", outbound["type"])
+				}
+			}
+			if outbound["tag"] == "proxy" {
+				outbound["routing_mark"] = TransportMark
+			} else {
+				outbound["routing_mark"] = DirectMark
+			}
+		}
+		// Dedicated bootstrap resolver cannot be selected by user routing rules.
+		outbounds = append(outbounds, map[string]any{"type": "direct", "tag": "bootstrap", "routing_mark": BootstrapMark})
+		baseConfig["outbounds"] = outbounds
+		dns := baseConfig["dns"].(map[string]any)
+		servers := dns["servers"].([]map[string]any)
+		servers = append(servers, map[string]any{"type": "udp", "tag": "dns-bootstrap", "server": "1.1.1.1", "detour": "bootstrap"})
+		dns["servers"] = servers
+		for _, outbound := range outbounds {
+			outbound["domain_resolver"] = "dns-bootstrap"
+		}
+		if rules, ok := dns["rules"].([]map[string]any); ok {
+			for _, rule := range rules {
+				if domains, ok := rule["domain"].([]string); ok && len(domains) == 1 && domains[0] == proxyServer {
+					rule["server"] = "dns-bootstrap"
+				}
+			}
+		}
+		if mode == "tun" {
+			baseConfig["inbounds"].([]map[string]any)[0]["address"] = []string{"172.19.0.1/24", "fdfe:dcba:9876::1/126"}
+		}
+	}
 	jsonBytes, err := json.MarshalIndent(baseConfig, "", "  ")
 	if err != nil {
 		return opts, err

@@ -46,4 +46,8 @@ jobs:
           test -c /dev/net/tun || sudo modprobe tun
           test -c /dev/net/tun
       - name: Test real TUN routing in isolated namespaces
-        run: make test-tun
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nftables
+          make test-guard
+          make test-tun

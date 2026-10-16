@@ -193,3 +193,6 @@ func stopProcessFile(dir string) error {
 
 // Stop asks the running instance to close its VPN and sidecar gracefully.
 func Stop() error { return stopProcessFile(processDir()) }
+
+// AcquireRuntime prevents a managed engine from overlapping a foreground instance.
+func AcquireRuntime() (func(), error) { return acquireProcessFile(processDir()) }

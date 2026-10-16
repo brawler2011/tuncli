@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/brawler2011/tuncli/pkg/config"
+	"github.com/brawler2011/tuncli/pkg/service"
 
 	"github.com/AlecAivazis/survey/v2"
 	"github.com/spf13/cobra"
@@ -13,6 +14,9 @@ var selectCmd = &cobra.Command{
 	Use:   "select",
 	Short: "Interactively select a node and mode",
 	RunE: func(cmd *cobra.Command, args []string) error {
+		if service.Installed() {
+			return managedSelect(cmd)
+		}
 		cfg, err := config.LoadConfig()
 		if err != nil {
 			return err

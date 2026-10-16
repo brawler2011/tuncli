@@ -128,6 +128,7 @@ type Entry struct {
 	Outbound Outbound
 }
 type Prepared struct {
+	Managed    bool
 	ServerIPs  []string
 	Policy     *Policy
 	Paths      map[string]string

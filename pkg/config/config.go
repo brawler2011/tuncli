@@ -39,7 +39,14 @@ type Node struct {
 	RawConfig map[string]any `json:"raw_config"` // For YAML/JSON formats
 }
 
+// Directory is set only by the privileged daemon, before serving requests.
+// Callers serialize changes while preparing a transaction.
+var Directory string
+
 func GetConfigDir() (string, error) {
+	if Directory != "" {
+		return Directory, nil
+	}
 	home := getHomeDir()
 	if home == "" {
 		var err error
@@ -76,6 +83,9 @@ func GetSubscriptionsDir() (string, error) {
 }
 
 func GetSubscriptionPath(id string) (string, error) {
+	if id == "" || filepath.Base(id) != id || id == "." || id == ".." {
+		return "", fmt.Errorf("invalid subscription ID")
+	}
 	dir, err := GetSubscriptionsDir()
 	if err != nil {
 		return "", err
