@@ -12,6 +12,10 @@ import (
 )
 
 func TestCommands(t *testing.T) {
+	// Exercise local handlers even when a real tuncli service is installed.
+	previous := daemonProcess
+	daemonProcess = true
+	t.Cleanup(func() { daemonProcess = previous })
 	tempHome := t.TempDir()
 	t.Setenv("HOME", tempHome)
 	t.Setenv("SUDO_USER", "")

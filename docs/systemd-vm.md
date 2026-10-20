@@ -44,5 +44,5 @@ shared host. Build with `make check-all && make build` first.
    `/var/lib/tuncli` must remain as a root-only settings export.
 
 Record the VM image, kernel, systemd/nft versions and results. Namespace tests
-cover the firewall policy and existing TUN routing independently; they do not
+cover the firewall policy, Docker-like bridges with TUN, and domain routing; they do not
 substitute for these boot, suspend, real-server and systemd checks.

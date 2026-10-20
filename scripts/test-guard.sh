@@ -2,9 +2,10 @@
 set -euo pipefail
 binary=$(realpath "${1:?Usage: test-guard.sh <compiled service test binary>}")
 if [[ ${2:-} != --inside ]]; then
-    for tool in ip nft unshare timeout; do
+    for tool in ip nft unshare nsenter timeout; do
         command -v "$tool" >/dev/null || { echo "Guard smoke requires $tool" >&2; exit 1; }
     done
+    [[ -c /dev/net/tun ]] || { echo 'Docker/TUN guard smoke requires /dev/net/tun' >&2; exit 1; }
     export GUARD_HOST_NETNS
     GUARD_HOST_NETNS=$(readlink /proc/self/ns/net)
     if unshare --user --map-root-user --net true 2>/dev/null; then
@@ -35,7 +36,11 @@ ip link add guard-wan type veth peer name guard-client
 ip address add 192.0.2.2/24 dev guard-wan
 ip -6 address add fd00:2026::2/64 dev guard-wan nodad
 ip link set guard-wan up
+ip route add default dev guard-wan
+ip -6 route add default dev guard-wan
 ip address add 1.1.1.1/32 dev lo
+ip address add 203.0.113.10/32 dev lo
+ip -6 address add 2001:db8::10/128 dev lo nodad
 "$binary" -test.v -test.timeout=55s -test.run '^TestGuardFixture$' >"$GUARD_SMOKE_DIR/fixture.log" 2>&1 &
 fixture_pid=$!
 unshare --net bash -euo pipefail -c '
@@ -50,7 +55,8 @@ unshare --net bash -euo pipefail -c '
     ip link set guard-client up
     ip route add default via 192.0.2.2
     ip -6 route add default via fd00:2026::2
-    exec "$1" -test.v -test.timeout=45s -test.run "^TestGuardSmoke$"
+    "$1" -test.v -test.timeout=45s -test.run "^TestGuard(Smoke|DockerSmoke)$"
+    touch "$GUARD_SMOKE_DIR/done"
 ' bash "$binary" >"$GUARD_SMOKE_DIR/client.log" 2>&1 &
 client_pid=$!
 for ((i=0;i<200;i++)); do
