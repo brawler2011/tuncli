@@ -13,9 +13,36 @@ import (
 	"testing"
 	"time"
 
+	box "github.com/sagernet/sing-box"
+	"github.com/sagernet/sing-box/adapter/endpoint"
+	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/adapter/outbound"
+	boxService "github.com/sagernet/sing-box/adapter/service"
+	"github.com/sagernet/sing-box/dns"
+	"github.com/sagernet/sing-box/dns/transport"
+	"github.com/sagernet/sing-box/dns/transport/local"
+	"github.com/sagernet/sing-box/option"
+	"github.com/sagernet/sing-box/protocol/direct"
+	"github.com/sagernet/sing-box/protocol/mixed"
+	"github.com/sagernet/sing-box/protocol/socks"
+	"github.com/sagernet/sing-box/protocol/tun"
+	singJSON "github.com/sagernet/sing/common/json"
+	singService "github.com/sagernet/sing/service"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
+
+func guardBoxContext() context.Context {
+	i, o, d := inbound.NewRegistry(), outbound.NewRegistry(), dns.NewTransportRegistry()
+	tun.RegisterInbound(i)
+	mixed.RegisterInbound(i)
+	socks.RegisterOutbound(o)
+	direct.RegisterOutbound(o)
+	transport.RegisterUDP(d)
+	transport.RegisterHTTPS(d)
+	local.RegisterTransport(d)
+	return singService.ContextWithDefaultRegistry(box.Context(context.Background(), i, o, endpoint.NewRegistry(), d, boxService.NewRegistry()))
+}
 
 func guardSmokeOnly(t *testing.T) {
 	t.Helper()
@@ -28,6 +55,14 @@ func guardSmokeOnly(t *testing.T) {
 }
 func TestGuardFixture(t *testing.T) {
 	guardSmokeOnly(t)
+	ctx := guardBoxContext()
+	opts, err := singJSON.UnmarshalExtendedContext[option.Options](ctx, []byte(`{"inbounds":[{"type":"mixed","listen":"192.0.2.2","listen_port":1080}],"outbounds":[{"type":"direct","tag":"direct"}],"route":{"final":"direct"}}`))
+	require.NoError(t, err)
+	opts.Log = &option.LogOptions{Level: "error"}
+	instance, err := box.New(box.Options{Context: ctx, Options: opts})
+	require.NoError(t, err)
+	require.NoError(t, instance.Start())
+	defer func() { _ = instance.Close() }()
 	for _, network := range []string{"tcp4", "tcp6"} {
 		listener, err := net.Listen(network, ":8080")
 		require.NoError(t, err)
@@ -44,7 +79,7 @@ func TestGuardFixture(t *testing.T) {
 			}
 		}()
 	}
-	for _, address := range []string{"192.0.2.2", "1.1.1.1", "fd00:2026::2"} {
+	for _, address := range []string{"192.0.2.2", "1.1.1.1", "fd00:2026::2", "203.0.113.10", "2001:db8::10"} {
 		for _, port := range []int{53, 54} {
 			conn, err := net.ListenPacket("udp", net.JoinHostPort(address, fmt.Sprint(port)))
 			require.NoError(t, err)
@@ -139,5 +174,4 @@ func TestGuardSmoke(t *testing.T) {
 		require.True(t, guardReachable("tcp", address, 0), "stop restores internet")
 	}
 	require.NoError(t, exec.Command("/usr/sbin/nft", "list", "table", "inet", "unrelated_fixture").Run(), "foreign tables must survive")
-	require.NoError(t, os.WriteFile(filepath.Join(os.Getenv("GUARD_SMOKE_DIR"), "done"), nil, 0600))
 }

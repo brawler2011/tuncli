@@ -180,12 +180,21 @@ tuncli run --mode proxy         # Does not require root
 
 Managed TUN requires nftables. A dedicated `inet tuncli_guard` table protects
 IPv4 and IPv6 before TUN creation; a separate early systemd unit runs before
-`network-pre.target`. Only loopback, DHCP/IPv6 link maintenance, TUN output,
+`network-pre.target`. Only loopback, local Linux bridge output, DHCP/IPv6 link maintenance, TUN output,
 marked VPN transport and bootstrap DNS to `1.1.1.1:53` are allowed while connecting.
 Configured direct traffic is allowed through the engine only after a successful
 HTTPS probe through the VPN. Probes run every 10 seconds with a 5-second timeout;
 two consecutive failures close direct access and trigger retries with delays
 from 1 to 30 seconds. No automatic server selection is performed.
+
+Linux bridges are treated as local networks. Host access to Docker containers
+and published localhost ports stays available while connecting or reconnecting.
+Bridge matching uses the interface kind, so new Docker networks and custom
+bridge names work without subnet exceptions or a VPN restart. Forwarding between
+bridges is allowed by tuncli; Docker's own firewall still controls network
+isolation. Container internet traffic may be forwarded only through TUN, with
+established replies allowed back to the bridge. It remains blocked when TUN is
+down. This policy assumes the internet-facing interface is not a Linux bridge.
 
 Process crashes and systemd restarts leave protection in the kernel. An explicit
 `stop` persists the disabled state, closes the engine and Xray, then removes only
@@ -337,8 +346,11 @@ On a Linux host with working IPv4/IPv6 and a selected VPN node:
 `make test-guard` uses isolated network namespaces and local TCP/UDP fixtures to
 check IPv4/IPv6 and DNS blocking, separate transport/direct/bootstrap marks,
 direct access only while connected, persistence after SIGKILL, foreign-table
-preservation and internet restoration after stop. It needs nftables, iproute2,
-util-linux, and user/network namespaces or passwordless sudo, without TUN or
-external internet. `make check-all` includes these checks and the existing real
+preservation and internet restoration after stop. It also checks new Docker-like
+bridges, host and inter-container access, localhost port publishing, container
+TCP/UDP over a real TUN, the local SOCKS5 proxy, downstream network isolation,
+and blocked container internet after TUN closes. It needs nftables, iproute2,
+util-linux, `/dev/net/tun`, and user/network namespaces or passwordless sudo.
+No external internet is needed. `make check-all` includes these checks and the existing real
 TUN routing suite. See [the systemd VM checklist](docs/systemd-vm.md) for the
 boot/login, cgroup, ownership and recovery acceptance checks.

@@ -25,6 +25,9 @@ func (NFT) Apply(direct bool) error {
 	return nil
 }
 func Rules(direct bool) string {
+	// Local Linux bridges remain usable, including bridges created after start.
+	// Forwarded internet traffic must still use TUN. Accept here does not skip
+	// Docker's later filter chains, which retain port and network isolation.
 	allowDirect := ""
 	if direct {
 		allowDirect = "add rule inet tuncli_guard output meta mark 355 accept\n"
@@ -32,12 +35,16 @@ func Rules(direct bool) string {
 	return `add chain inet tuncli_guard output { type filter hook output priority -150; policy drop; }
 add rule inet tuncli_guard output oifname "lo" accept
 add rule inet tuncli_guard output oifname "tuncli-tun0" accept
+add rule inet tuncli_guard output meta oifkind "bridge" accept
 add rule inet tuncli_guard output udp sport 68 udp dport 67 accept
 add rule inet tuncli_guard output udp sport 546 udp dport 547 ip6 daddr ff02::1:2 accept
 add rule inet tuncli_guard output meta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept
 add rule inet tuncli_guard output meta mark 354 accept
 add rule inet tuncli_guard output meta mark 356 ip daddr 1.1.1.1 udp dport 53 accept
 ` + allowDirect + `add chain inet tuncli_guard forward { type filter hook forward priority -150; policy drop; }
+add rule inet tuncli_guard forward meta iifkind "bridge" meta oifkind "bridge" accept
+add rule inet tuncli_guard forward meta iifkind "bridge" oifname "tuncli-tun0" accept
+add rule inet tuncli_guard forward iifname "tuncli-tun0" meta oifkind "bridge" ct state established,related accept
 `
 }
 func (NFT) Remove() error {
