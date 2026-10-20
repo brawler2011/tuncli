@@ -29,10 +29,6 @@ type Node struct {
 }
 
 func LoadOrCreateHWID() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", err
-	}
 	dir, err := config.GetConfigDir()
 	if err != nil {
 		return "", err
@@ -52,11 +48,16 @@ func LoadOrCreateHWID() (string, error) {
 	}
 
 	// Prefer v2raytun-port HWID if available (device already registered)
-	v2rayHwidPath := filepath.Join(home, ".config", "v2raytun-port", "hwid")
-	if data, err := os.ReadFile(v2rayHwidPath); err == nil && !storage.Private {
-		hwid := strings.TrimSpace(string(data))
-		if hwid != "" {
-			return hwid, storage.Write(hwidPath, []byte(hwid))
+	// System services use their private state directory and need no HOME.
+	if !storage.Private {
+		if home, err := os.UserHomeDir(); err == nil {
+			v2rayHwidPath := filepath.Join(home, ".config", "v2raytun-port", "hwid")
+			if data, err := os.ReadFile(v2rayHwidPath); err == nil {
+				hwid := strings.TrimSpace(string(data))
+				if hwid != "" {
+					return hwid, storage.Write(hwidPath, []byte(hwid))
+				}
+			}
 		}
 	}
 
@@ -87,9 +88,10 @@ func FetchAndParse(subURL string) ([]Node, error) {
 	req.Header.Set("User-Agent", "clash-verge/v2.2.3")
 
 	hwid, err := LoadOrCreateHWID()
-	if err == nil && hwid != "" {
-		req.Header.Set("X-HWID", hwid)
+	if err != nil {
+		return nil, fmt.Errorf("loading device identifier failed: %w", err)
 	}
+	req.Header.Set("X-HWID", hwid)
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	resp, err := client.Do(req)
