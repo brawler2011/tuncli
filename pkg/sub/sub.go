@@ -1,6 +1,7 @@
 package sub
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -72,6 +73,9 @@ func generateUUID() string {
 }
 
 func FetchAndParse(subURL string) ([]Node, error) {
+	return FetchAndParseContext(context.Background(), subURL)
+}
+func FetchAndParseContext(ctx context.Context, subURL string) ([]Node, error) {
 	if isDirectURI(subURL) {
 		node, err := parseSingleURI(subURL)
 		if err != nil {
@@ -80,7 +84,7 @@ func FetchAndParse(subURL string) ([]Node, error) {
 		return []Node{node}, nil
 	}
 
-	req, err := http.NewRequest("GET", subURL, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", subURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request failed: %w", err)
 	}

@@ -30,17 +30,21 @@ type realPlan struct{ p *runner.ManagedPlan }
 func (p realPlan) Open(ctx context.Context) (Engine, error) { return p.p.Open(ctx) }
 
 type Controller struct {
-	view     atomic.Pointer[Status]
-	mu       sync.Mutex
-	Dir      string
-	Firewall Firewall
-	Prepare  func(context.Context, *config.Config) (Plan, error)
-	Command  func([]string) (string, error)
-	status   Status
-	engine   Engine
-	failures int
-	retry    time.Time
-	backoff  time.Duration
+	view           atomic.Pointer[Status]
+	mu             sync.Mutex
+	activityMu     sync.Mutex
+	activeCancel   context.CancelFunc
+	stopping       int
+	Dir            string
+	Firewall       Firewall
+	Prepare        func(context.Context, *config.Config) (Plan, error)
+	Command        func([]string) (string, error)
+	CommandContext func(context.Context, []string) (string, error)
+	status         Status
+	engine         Engine
+	failures       int
+	retry          time.Time
+	backoff        time.Duration
 }
 
 func NewController(dir string, command func([]string) (string, error)) *Controller {
@@ -103,7 +107,10 @@ func (c *Controller) connect(ctx context.Context, cfg *config.Config, p Plan) er
 		return err
 	}
 	c.engine = engine
-	probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, c.closeEngine())
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, runner.StartupProbeTimeout)
 	err = engine.Probe(probeCtx)
 	cancel()
 	if err != nil {
@@ -129,7 +136,36 @@ func (c *Controller) connect(ctx context.Context, cfg *config.Config, p Plan) er
 	c.backoff = time.Second
 	return nil
 }
+
+// Called while mu is held; stop can cancel network work without waiting for mu.
+func (c *Controller) begin(ctx context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	c.activityMu.Lock()
+	c.activeCancel = cancel
+	if c.stopping > 0 {
+		cancel()
+	}
+	c.activityMu.Unlock()
+	return ctx, func() {
+		c.activityMu.Lock()
+		c.activeCancel = nil
+		cancel()
+		c.activityMu.Unlock()
+	}
+}
+func (c *Controller) command(ctx context.Context, args []string) (string, error) {
+	if c.CommandContext != nil {
+		return c.CommandContext(ctx, args)
+	}
+	if c.Command == nil {
+		return "", fmt.Errorf("command unavailable")
+	}
+	return c.Command(args)
+}
 func (c *Controller) Handle(request Request) Response {
+	return c.HandleContext(context.Background(), request)
+}
+func (c *Controller) HandleContext(requestCtx context.Context, request Request) Response {
 	if request.Operation == "status" {
 		s := c.view.Load()
 		if s == nil {
@@ -138,10 +174,25 @@ func (c *Controller) Handle(request Request) Response {
 		copyStatus := *s
 		return Response{Status: &copyStatus}
 	}
+	if request.Operation == "stop" {
+		c.activityMu.Lock()
+		c.stopping++
+		if c.activeCancel != nil {
+			c.activeCancel()
+		}
+		c.activityMu.Unlock()
+		defer func() { c.activityMu.Lock(); c.stopping--; c.activityMu.Unlock() }()
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.publish()
-	result, err := c.handle(context.Background(), request)
+	ctx := context.Background()
+	if request.Operation != "stop" {
+		var finish func()
+		ctx, finish = c.begin(requestCtx)
+		defer finish()
+	}
+	result, err := c.handle(ctx, request)
 	if err != nil {
 		result.Error = err.Error()
 	}
@@ -149,6 +200,9 @@ func (c *Controller) Handle(request Request) Response {
 }
 func (c *Controller) handle(ctx context.Context, r Request) (Response, error) {
 	var result Response
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
 	if r.Operation == "status" {
 		status := c.status
 		result.Status = &status
@@ -196,7 +250,7 @@ func (c *Controller) handle(ctx context.Context, r Request) (Response, error) {
 		return result, fmt.Errorf("unknown operation %q", r.Operation)
 	}
 	if r.Operation == "command" && (len(r.Args) == 1 && r.Args[0] == "list" || len(r.Args) == 2 && r.Args[0] == "routing" && r.Args[1] == "show" || len(r.Args) == 3 && r.Args[0] == "routing" && r.Args[1] == "preset" && r.Args[2] == "list") {
-		output, err := c.Command(r.Args)
+		output, err := c.command(ctx, r.Args)
 		result.Output = output
 		return result, err
 	}
@@ -229,9 +283,10 @@ func (c *Controller) handle(ctx context.Context, r Request) (Response, error) {
 		return result, err
 	}
 	oldNode, _ := runner.Selected(old)
+	wasRunning := c.engine != nil
 	rollback := func(e error) (Response, error) {
 		restoreErr := restore(c.Dir, before)
-		if c.status.Desired && c.engine == nil && restoreErr == nil {
+		if ctx.Err() == nil && wasRunning && c.status.Desired && c.engine == nil && restoreErr == nil {
 			if p, err := c.Prepare(ctx, old); err == nil {
 				restoreErr = c.connect(ctx, old, p)
 			} else {
@@ -249,10 +304,10 @@ func (c *Controller) handle(ctx context.Context, r Request) (Response, error) {
 	}
 	switch r.Operation {
 	case "command":
-		if c.Command == nil {
+		if c.Command == nil && c.CommandContext == nil {
 			return rollback(fmt.Errorf("command unavailable"))
 		}
-		result.Output, err = c.Command(r.Args)
+		result.Output, err = c.command(ctx, r.Args)
 		if err != nil {
 			return rollback(err)
 		}
@@ -360,6 +415,11 @@ func (c *Controller) Tick(ctx context.Context) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	defer c.publish()
+	ctx, finish := c.begin(ctx)
+	defer finish()
+	if ctx.Err() != nil {
+		return
+	}
 	if !c.status.Desired {
 		return
 	}
