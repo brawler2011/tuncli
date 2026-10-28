@@ -40,7 +40,7 @@ add rule inet tuncli_guard output udp sport 68 udp dport 67 accept
 add rule inet tuncli_guard output udp sport 546 udp dport 547 ip6 daddr ff02::1:2 accept
 add rule inet tuncli_guard output meta l4proto ipv6-icmp icmpv6 type { nd-router-solicit, nd-neighbor-solicit, nd-neighbor-advert, nd-router-advert } ip6 hoplimit 255 accept
 add rule inet tuncli_guard output meta mark 354 accept
-add rule inet tuncli_guard output meta mark 356 ip daddr 1.1.1.1 udp dport 53 accept
+add rule inet tuncli_guard output meta mark 356 ip daddr { 1.1.1.1, 8.8.8.8 } meta l4proto { tcp, udp } th dport 53 accept
 ` + allowDirect + `add chain inet tuncli_guard forward { type filter hook forward priority -150; policy drop; }
 add rule inet tuncli_guard forward meta iifkind "bridge" meta oifkind "bridge" accept
 add rule inet tuncli_guard forward meta iifkind "bridge" oifname "tuncli-tun0" accept

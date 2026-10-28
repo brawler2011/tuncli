@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -63,8 +64,12 @@ func TestGuardFixture(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, instance.Start())
 	defer func() { _ = instance.Close() }()
-	for _, network := range []string{"tcp4", "tcp6"} {
-		listener, err := net.Listen(network, ":8080")
+	for _, address := range []string{"0.0.0.0:8080", "[::]:8080", "1.1.1.1:53", "1.1.1.1:54", "8.8.8.8:53", "8.8.8.8:54", "192.0.2.2:53"} {
+		network := "tcp4"
+		if strings.HasPrefix(address, "[") {
+			network = "tcp6"
+		}
+		listener, err := net.Listen(network, address)
 		require.NoError(t, err)
 		defer func() { _ = listener.Close() }()
 		go func() {
@@ -79,7 +84,7 @@ func TestGuardFixture(t *testing.T) {
 			}
 		}()
 	}
-	for _, address := range []string{"192.0.2.2", "1.1.1.1", "fd00:2026::2", "203.0.113.10", "2001:db8::10"} {
+	for _, address := range []string{"192.0.2.2", "1.1.1.1", "8.8.8.8", "fd00:2026::2", "203.0.113.10", "2001:db8::10"} {
 		for _, port := range []int{53, 54} {
 			conn, err := net.ListenPacket("udp", net.JoinHostPort(address, fmt.Sprint(port)))
 			require.NoError(t, err)
@@ -162,6 +167,15 @@ func TestGuardSmoke(t *testing.T) {
 			require.Equal(t, connected, guardReachable("udp", address, 355), "direct DNS")
 		}
 		require.True(t, guardReachable("udp", "1.1.1.1:53", 356))
+		require.True(t, guardReachable("tcp", "1.1.1.1:53", 356), "bootstrap TCP fallback")
+		require.True(t, guardReachable("tcp", "8.8.8.8:53", 356))
+		require.True(t, guardReachable("udp", "8.8.8.8:53", 356))
+		require.False(t, guardReachable("tcp", "8.8.8.8:53", 0))
+		require.False(t, guardReachable("udp", "8.8.8.8:53", 0))
+		require.False(t, guardReachable("tcp", "8.8.8.8:54", 356))
+		require.False(t, guardReachable("tcp", "1.1.1.1:53", 0), "unmarked TCP DNS leak")
+		require.False(t, guardReachable("tcp", "1.1.1.1:54", 356))
+		require.False(t, guardReachable("tcp", "192.0.2.2:53", 356))
 		require.False(t, guardReachable("udp", "1.1.1.1:54", 356))
 		require.False(t, guardReachable("udp", "192.0.2.2:53", 356))
 	}

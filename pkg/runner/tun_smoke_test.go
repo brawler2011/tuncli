@@ -29,6 +29,7 @@ import (
 	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing-box/protocol/shadowsocks"
 	singJSON "github.com/sagernet/sing/common/json"
+	M "github.com/sagernet/sing/common/metadata"
 	"github.com/sagernet/sing/service"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -189,6 +190,7 @@ func TestTUNSmokeFixture(t *testing.T) {
 
 func TestTUNSmoke(t *testing.T) {
 	dir := smokeDirectory(t)
+	t.Run("managed-lifecycle", testManagedTUNLifecycle)
 	for _, def := range []routing.Outbound{routing.VPN, routing.Direct} {
 		t.Run(string(def), func(t *testing.T) {
 			prepared := preparedFixture(t, def)
@@ -451,7 +453,7 @@ func smokeReusedUDP(t *testing.T, direct, vpn string) {
 	t.Helper()
 	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.ParseIP("172.19.0.1")})
 	require.NoError(t, err)
-	defer conn.Close() //nolint:errcheck
+	defer func() { _ = conn.Close() }() //nolint:errcheck
 	for _, tc := range []struct{ address, want string }{{direct, "direct"}, {vpn, "vpn"}, {direct, "direct"}} {
 		require.NoError(t, conn.SetDeadline(time.Now().Add(3*time.Second)))
 		peer := &net.UDPAddr{IP: net.ParseIP(tc.address), Port: 8081}
@@ -462,5 +464,49 @@ func smokeReusedUDP(t *testing.T, direct, vpn string) {
 		require.NoError(t, err)
 		assert.Equal(t, tc.want, string(payload[:n]), "UDP source %s destination %s", conn.LocalAddr(), peer)
 		assert.Equal(t, peer.String(), from.String())
+	}
+}
+
+// Exercise the real managed engine, including failure after acquiring TUN.
+func testManagedTUNLifecycle(t *testing.T) {
+	node := routingNode()
+	node.Server = "192.0.2.2"
+	node.RawConfig["server"] = node.Server
+	node.RawConfig["password"] = smokePassword
+	opts, err := BuildSingboxConfigWithPolicy(singboxContext(context.Background()), node, "tun", &routing.Prepared{Managed: true})
+	require.NoError(t, err)
+	opts.Log = &option.LogOptions{Level: "error", DisableColor: true}
+	plan := &ManagedPlan{Node: *node, Mode: "tun", options: opts}
+	// Mixed listens after TUN is acquired. A failed start must release TUN too.
+	occupied, err := net.Listen("tcp", "127.0.0.1:2080")
+	require.NoError(t, err)
+	_, startErr := plan.Open(context.Background())
+	require.NoError(t, occupied.Close())
+	require.Error(t, startErr)
+	for range 3 {
+		ctx, cancel := context.WithCancel(context.Background())
+		engine, err := plan.Open(ctx)
+		cancel() // Finishing a control request must not stop its engine.
+		require.NoError(t, err)
+		func() {
+			defer func() { require.NoError(t, engine.Close()) }()
+			_, err := net.InterfaceByName("tuncli-tun0")
+			require.NoError(t, err)
+			outbound, ok := engine.instance.Outbound().Outbound("proxy")
+			require.True(t, ok)
+			checkCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			conn, err := outbound.DialContext(checkCtx, "tcp", M.ParseSocksaddr("203.0.113.10:8080"))
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			require.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+			_, err = io.WriteString(conn, "GET / HTTP/1.0\r\nHost: fixture\r\n\r\n")
+			require.NoError(t, err)
+			response, err := io.ReadAll(conn)
+			require.NoError(t, err)
+			require.Contains(t, string(response), "200 OK")
+		}()
+		_, err = net.InterfaceByName("tuncli-tun0")
+		require.Error(t, err, "Close returned before TUN was released")
 	}
 }

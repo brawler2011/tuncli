@@ -181,11 +181,19 @@ tuncli run --mode proxy         # Does not require root
 Managed TUN requires nftables. A dedicated `inet tuncli_guard` table protects
 IPv4 and IPv6 before TUN creation; a separate early systemd unit runs before
 `network-pre.target`. Only loopback, local Linux bridge output, DHCP/IPv6 link maintenance, TUN output,
-marked VPN transport and bootstrap DNS to `1.1.1.1:53` are allowed while connecting.
+marked VPN transport and bootstrap DNS to `1.1.1.1:53` and `8.8.8.8:53` (UDP and TCP raced to
+avoid stalls when a resolver or transport is blocked) are allowed while connecting.
 Configured direct traffic is allowed through the engine only after a successful
-HTTPS probe through the VPN. Probes run every 10 seconds with a 5-second timeout;
+HTTPS probe through the VPN. Cloudflare and Google checks run in parallel;
+one successful check is sufficient. Initial connection checks allow up to 20 seconds,
+including the transport handshake. Health probes run every 10 seconds with a 5-second timeout;
 two consecutive failures close direct access and trigger retries with delays
 from 1 to 30 seconds. No automatic server selection is performed.
+
+Probe errors identify the VPN server and distinguish the VPN transport handshake
+(including TLS/REALITY) from TLS to the probe site and waiting for its HTTP
+response. A failed start keeps protection active and schedules a background retry;
+it does not immediately repeat the same connection during settings rollback.
 
 Linux bridges are treated as local networks. Host access to Docker containers
 and published localhost ports stays available while connecting or reconnecting.
@@ -197,7 +205,10 @@ established replies allowed back to the bridge. It remains blocked when TUN is
 down. This policy assumes the internet-facing interface is not a Linux bridge.
 
 Process crashes and systemd restarts leave protection in the kernel. An explicit
-`stop` persists the disabled state, closes the engine and Xray, then removes only
+`stop` cancels pending DNS, subscription downloads and connection checks before
+persisting the disabled state. Ctrl+C also cancels the client’s pending request.
+Closing a managed engine waits for Linux to release its TUN interface before
+a subsequent start can reuse it. It closes the engine and Xray, then removes only
 tuncli's table. Settings changes are serialized, validated before disconnecting,
 and rolled back on launch failure. A transaction journal restores interrupted
 settings updates after a crash. Foreign nftables tables are never flushed.

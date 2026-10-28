@@ -39,6 +39,7 @@ ip link set guard-wan up
 ip route add default dev guard-wan
 ip -6 route add default dev guard-wan
 ip address add 1.1.1.1/32 dev lo
+ip address add 8.8.8.8/32 dev lo
 ip address add 203.0.113.10/32 dev lo
 ip -6 address add 2001:db8::10/128 dev lo nodad
 "$binary" -test.v -test.timeout=55s -test.run '^TestGuardFixture$' >"$GUARD_SMOKE_DIR/fixture.log" 2>&1 &

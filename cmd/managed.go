@@ -43,6 +43,9 @@ func managedSelect(cmd *cobra.Command) error {
 	return err
 }
 func serviceCommand(args []string) (string, error) {
+	return serviceCommandContext(context.Background(), args)
+}
+func serviceCommandContext(ctx context.Context, args []string) (string, error) {
 	if len(args) == 0 {
 		return "", fmt.Errorf("missing command")
 	}
@@ -69,6 +72,9 @@ func serviceCommand(args []string) (string, error) {
 	if err = command.ValidateRequiredFlags(); err != nil {
 		return "", err
 	}
+	previousContext := command.Context()
+	command.SetContext(ctx)
+	defer command.SetContext(previousContext)
 	output := new(bytes.Buffer)
 	command.SetOut(output)
 	command.SetErr(output)
@@ -120,7 +126,7 @@ func init() {
 		daemonProcess = true
 		ctx, cancel := signal.NotifyContext(cmd.Context(), os.Interrupt, syscall.SIGTERM)
 		defer cancel()
-		return service.Daemon(ctx, serviceCommand)
+		return service.DaemonContext(ctx, serviceCommandContext)
 	}})
 	rootCmd.AddCommand(&cobra.Command{Use: "restart", Short: "Reconnect a running VPN", Args: cobra.NoArgs, RunE: func(cmd *cobra.Command, _ []string) error {
 		_, err := service.Call(cmd.Context(), service.Request{Operation: "restart"})

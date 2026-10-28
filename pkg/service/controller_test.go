@@ -44,9 +44,10 @@ func (f *fakeFirewall) Remove() error {
 }
 
 type fakeEngine struct {
-	closed   bool
-	probeErr error
-	fw       *fakeFirewall
+	closed      bool
+	probeErr    error
+	fw          *fakeFirewall
+	probeBudget time.Duration
 }
 
 func (e *fakeEngine) Close() error {
@@ -54,7 +55,12 @@ func (e *fakeEngine) Close() error {
 	e.fw.events = append(e.fw.events, "engine stopped")
 	return nil
 }
-func (e *fakeEngine) Probe(context.Context) error { return e.probeErr }
+func (e *fakeEngine) Probe(ctx context.Context) error {
+	if deadline, ok := ctx.Deadline(); ok {
+		e.probeBudget = time.Until(deadline)
+	}
+	return e.probeErr
+}
 
 type fakePlan struct {
 	engine *fakeEngine
@@ -148,6 +154,40 @@ func TestHealthFailureClosesDirectAndRetries(t *testing.T) {
 	c.Tick(context.Background())
 	require.Equal(t, "connected", c.status.State)
 	require.True(t, fw.direct)
+}
+
+func TestStartupAllowsTransportHandshakeAndHealthRemainsBounded(t *testing.T) {
+	c, _ := controllerFixture(t)
+	require.Empty(t, c.Handle(Request{Operation: "start"}).Error)
+	engine := c.engine.(*fakeEngine)
+	require.Greater(t, engine.probeBudget, 15*time.Second)
+	require.LessOrEqual(t, engine.probeBudget, 20*time.Second)
+	c.Tick(context.Background())
+	require.Positive(t, engine.probeBudget)
+	require.LessOrEqual(t, engine.probeBudget, 5*time.Second)
+}
+
+func TestFailedStartDoesNotImmediatelyRepeatConnection(t *testing.T) {
+	c, fw := controllerFixture(t)
+	attempts := 0
+	c.Prepare = func(context.Context, *config.Config) (Plan, error) {
+		attempts++
+		return fakePlan{engine: &fakeEngine{fw: fw, probeErr: errors.New("transport timed out")}}, nil
+	}
+	response := c.Handle(Request{Operation: "start"})
+	require.Equal(t, "transport timed out", response.Error)
+	require.Equal(t, 1, attempts)
+	require.Nil(t, c.engine)
+	require.True(t, c.status.Desired)
+	require.True(t, fw.active)
+	require.False(t, fw.direct)
+	require.Equal(t, "error", c.status.State)
+	// A retry remains scheduled, instead of an immediate duplicate in rollback.
+	c.Tick(context.Background())
+	require.Equal(t, 1, attempts)
+	c.retry = time.Time{}
+	c.Tick(context.Background())
+	require.Equal(t, 2, attempts)
 }
 func TestCommandsSerializedAndUpdateUnselectedNode(t *testing.T) {
 	c, _ := controllerFixture(t)
@@ -328,4 +368,115 @@ func TestStatusAvailableDuringConnect(t *testing.T) {
 	close(release)
 	released = true
 	require.Empty(t, (<-done).Error)
+}
+
+// These operations used to hold mu for their entire network timeout, preventing
+// stop from closing TUN and removing the guard.
+func TestStopCancelsNetworkWork(t *testing.T) {
+	for _, phase := range []string{"prepare", "probe", "update", "health"} {
+		t.Run(phase, func(t *testing.T) {
+			c, fw := controllerFixture(t)
+			require.Empty(t, c.Handle(Request{Operation: "start"}).Error)
+			old := c.engine.(*fakeEngine)
+			entered := make(chan struct{})
+			wait := func(ctx context.Context) error { close(entered); <-ctx.Done(); return ctx.Err() }
+			request := Request{Operation: "restart"}
+			switch phase {
+			case "prepare":
+				c.Prepare = func(ctx context.Context, _ *config.Config) (Plan, error) { return nil, wait(ctx) }
+			case "probe", "health":
+				engine := &cancelProbeEngine{fakeEngine: old, wait: wait}
+				if phase == "health" {
+					c.engine = engine
+				} else {
+					c.Prepare = func(context.Context, *config.Config) (Plan, error) { return enginePlan{engine}, nil }
+				}
+			case "update":
+				request = Request{Operation: "command", Args: []string{"update"}}
+				c.CommandContext = func(ctx context.Context, _ []string) (string, error) { return "", wait(ctx) }
+			}
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if phase == "health" {
+					c.Tick(context.Background())
+				} else {
+					c.Handle(request)
+				}
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("network operation never started")
+			}
+			stopped := make(chan Response, 1)
+			go func() { stopped <- c.Handle(Request{Operation: "stop"}) }()
+			select {
+			case r := <-stopped:
+				require.Empty(t, r.Error)
+			case <-time.After(time.Second):
+				t.Fatal("stop did not cancel network operation")
+			}
+			<-done
+			require.True(t, old.closed)
+			require.Nil(t, c.engine)
+			require.False(t, fw.active)
+			require.False(t, c.status.Desired)
+			require.Equal(t, "stopped", c.status.State)
+			c.Tick(context.Background())
+			require.Nil(t, c.engine)
+		})
+	}
+}
+
+type cancelProbeEngine struct {
+	*fakeEngine
+	wait func(context.Context) error
+}
+
+func (e *cancelProbeEngine) Probe(ctx context.Context) error { return e.wait(ctx) }
+
+type enginePlan struct{ engine Engine }
+
+func (p enginePlan) Open(context.Context) (Engine, error) { return p.engine, nil }
+
+func TestSocketCancellationReachesHandler(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "control.sock")
+	listener, err := net.ListenUnix("unix", &net.UnixAddr{Name: path, Net: "unix"})
+	require.NoError(t, err)
+	defer func() { _ = listener.Close() }()
+	entered, canceled := make(chan struct{}), make(chan struct{})
+	go func() {
+		conn, err := listener.AcceptUnix()
+		if err != nil {
+			return
+		}
+		ServeConnectionContext(conn, uint32(os.Getuid()), func(ctx context.Context, _ Request) Response {
+			close(entered)
+			<-ctx.Done()
+			close(canceled)
+			return Response{Error: ctx.Err().Error()}
+		})
+	}()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := CallSocket(ctx, path, Request{Operation: "start"}); done <- err }()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("handler not entered")
+	}
+	cancel()
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("client cancellation did not reach handler")
+	}
+	select {
+	case err := <-done:
+		require.Error(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("client did not exit")
+	}
 }

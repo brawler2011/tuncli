@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -28,7 +29,7 @@ var updateCmd = &cobra.Command{
 			for _, item := range cfg.Subscriptions {
 				if item.Type == "subscription" {
 					hasSubs = true
-					err := updateSubscription(item)
+					err := updateSubscriptionContext(cmd.Context(), item)
 					if err != nil {
 						failures = append(failures, fmt.Errorf("%s: %w", item.Name, err))
 					}
@@ -80,13 +81,13 @@ var updateCmd = &cobra.Command{
 			return fmt.Errorf("item %q is a direct server and does not need updating", item.Name)
 		}
 
-		return updateSubscription(item)
+		return updateSubscriptionContext(cmd.Context(), item)
 	},
 }
 
-func updateSubscription(item config.SubscriptionItem) error {
+func updateSubscriptionContext(ctx context.Context, item config.SubscriptionItem) error {
 	fmt.Printf("Updating %s (%s)...\n", item.Name, item.ID)
-	fetchedNodes, err := sub.FetchAndParse(item.URL)
+	fetchedNodes, err := sub.FetchAndParseContext(ctx, item.URL)
 	if err != nil {
 		return fmt.Errorf("failed to fetch/parse: %w", err)
 	}

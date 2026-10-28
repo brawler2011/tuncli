@@ -59,6 +59,8 @@ func CallSocket(ctx context.Context, path string, request Request) (Response, er
 		return result, fmt.Errorf("tuncli service unavailable (no foreground fallback): %w", err)
 	}
 	defer func() { _ = conn.Close() }()
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancel()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	if err = json.NewEncoder(conn).Encode(request); err != nil {
 		return result, err
@@ -92,6 +94,9 @@ func peerUID(conn *net.UnixConn) (uint32, error) {
 	return uid, sockErr
 }
 func ServeConnection(conn *net.UnixConn, owner uint32, handle func(Request) Response) {
+	ServeConnectionContext(conn, owner, func(_ context.Context, r Request) Response { return handle(r) })
+}
+func ServeConnectionContext(conn *net.UnixConn, owner uint32, handle func(context.Context, Request) Response) {
 	defer func() { _ = conn.Close() }()
 	_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
 	uid, err := peerUID(conn)
@@ -148,7 +153,11 @@ func ServeConnection(conn *net.UnixConn, owner uint32, handle func(Request) Resp
 		}
 		return
 	}
-	_ = json.NewEncoder(conn).Encode(handle(request))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// The client closes its socket on Ctrl+C. Cancel DNS/download/probe work too.
+	go func() { var b [1]byte; _, _ = conn.Read(b[:]); cancel() }()
+	_ = json.NewEncoder(conn).Encode(handle(ctx, request))
 }
 func Logs(ctx context.Context, follow bool, out io.Writer) error {
 	conn, err := (&net.Dialer{Timeout: 3 * time.Second}).DialContext(ctx, "unix", Socket)

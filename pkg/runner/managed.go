@@ -2,16 +2,14 @@ package runner
 
 import (
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
 	"maps"
 	"net"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -34,9 +32,13 @@ type ManagedPlan struct {
 	options option.Options
 }
 type ManagedEngine struct {
-	instance *box.Box
-	sidecar  *XraySidecar
-	cancel   context.CancelFunc
+	instance  *box.Box
+	sidecar   *XraySidecar
+	cancel    context.CancelFunc
+	server    string
+	tunName   string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func Selected(cfg *config.Config) (config.Node, error) {
@@ -106,7 +108,7 @@ func PrepareManaged(ctx context.Context, cfg *config.Config) (*ManagedPlan, erro
 	}
 	prepared.Managed = true
 	if net.ParseIP(node.Server) == nil {
-		resolver := net.Resolver{PreferGo: true, Dial: func(ctx context.Context, _, _ string) (net.Conn, error) {
+		dial := func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Control: func(_, _ string, c syscall.RawConn) error {
 				var e error
 				err := c.Control(func(fd uintptr) {
@@ -117,10 +119,10 @@ func PrepareManaged(ctx context.Context, cfg *config.Config) (*ManagedPlan, erro
 				})
 				return errors.Join(err, e)
 			}}
-			return d.DialContext(ctx, "udp", "1.1.1.1:53")
-		}}
+			return d.DialContext(ctx, network, address)
+		}
 		lookupCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		ips, e := resolver.LookupIP(lookupCtx, "ip", node.Server)
+		ips, e := lookupBootstrap(lookupCtx, node.Server, dial)
 		cancel()
 		if e != nil {
 			return nil, fmt.Errorf("bootstrap DNS: %w", e)
@@ -162,8 +164,11 @@ func PrepareManaged(ctx context.Context, cfg *config.Config) (*ManagedPlan, erro
 }
 
 func (p *ManagedPlan) Open(ctx context.Context) (engine *ManagedEngine, err error) {
-	ctx, cancel := context.WithCancel(singboxContext(ctx))
-	e := &ManagedEngine{cancel: cancel}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithCancel(singboxContext(context.WithoutCancel(ctx)))
+	e := &ManagedEngine{cancel: cancel, server: net.JoinHostPort(p.Node.Server, fmt.Sprint(p.Node.Port))}
 	defer func() {
 		if err != nil {
 			_ = e.Close()
@@ -182,6 +187,13 @@ func (p *ManagedPlan) Open(ctx context.Context) (engine *ManagedEngine, err erro
 	if err != nil {
 		return nil, err
 	}
+	// Only wait for an interface created by this engine, never for another
+	// process that already owned the same name before Start.
+	if p.Mode == "tun" {
+		if _, lookupErr := net.InterfaceByName("tuncli-tun0"); lookupErr != nil {
+			e.tunName = "tuncli-tun0"
+		}
+	}
 	if err = e.instance.Start(); err != nil {
 		return nil, err
 	}
@@ -191,16 +203,47 @@ func (e *ManagedEngine) Close() error {
 	if e == nil {
 		return nil
 	}
-	e.cancel()
-	var err error
-	if e.instance != nil {
-		err = e.instance.Close()
-	}
-	if e.sidecar != nil {
-		err = errors.Join(err, e.sidecar.Stop())
-	}
-	return err
+	e.closeOnce.Do(func() {
+		var tunIndex int
+		if e.tunName != "" {
+			if iface, err := net.InterfaceByName(e.tunName); err == nil {
+				tunIndex = iface.Index
+			}
+		}
+		e.cancel()
+		if e.instance != nil {
+			e.closeErr = e.instance.Close()
+			// sing-box Start already closes the box on a partial startup failure.
+			if errors.Is(e.closeErr, os.ErrClosed) {
+				e.closeErr = nil
+			}
+		}
+		if e.sidecar != nil {
+			e.closeErr = errors.Join(e.closeErr, e.sidecar.Stop())
+		}
+		if tunIndex != 0 {
+			e.closeErr = errors.Join(e.closeErr, waitTUNRelease(tunIndex, e.tunName))
+		}
+	})
+	return e.closeErr
 }
+
+// Linux may retain the TUN file through an in-flight read after close returns.
+// Starting the next box before that read exits produces TUNSETIFF/EBUSY.
+func waitTUNRelease(index int, name string) error {
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		iface, err := net.InterfaceByIndex(index)
+		if err != nil || iface.Name != name {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("TUN interface %s was not released after close", name)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func (e *ManagedEngine) Probe(ctx context.Context) error {
 	if e.sidecar != nil {
 		select {
@@ -213,26 +256,11 @@ func (e *ManagedEngine) Probe(ctx context.Context) error {
 	if !ok {
 		return fmt.Errorf("VPN outbound missing")
 	}
-	transport := &http.Transport{TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12}, DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+	err := probeVPN(ctx, []string{"https://1.1.1.1/cdn-cgi/trace", "https://www.gstatic.com/generate_204"}, nil, func(ctx context.Context, network, address string) (net.Conn, error) {
 		return outbound.DialContext(ctx, network, M.ParseSocksaddr(address))
-	}}
-	defer transport.CloseIdleConnections()
-	client := &http.Client{Transport: transport, Timeout: 5 * time.Second, CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://1.1.1.1/cdn-cgi/trace", nil)
+	})
 	if err != nil {
-		return err
-	}
-	response, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = response.Body.Close() }()
-	_, err = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-	if err != nil {
-		return err
-	}
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("VPN probe HTTP %d", response.StatusCode)
+		return fmt.Errorf("VPN server %s: %w", e.server, err)
 	}
 	return nil
 }

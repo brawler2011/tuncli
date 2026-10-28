@@ -129,6 +129,10 @@ func Guard() error {
 	return c.Firewall.Remove()
 }
 func Daemon(ctx context.Context, command func([]string) (string, error)) error {
+	return DaemonContext(ctx, func(_ context.Context, args []string) (string, error) { return command(args) })
+}
+
+func DaemonContext(ctx context.Context, command func(context.Context, []string) (string, error)) error {
 	if err := privateState(); err != nil {
 		return err
 	}
@@ -147,7 +151,8 @@ func Daemon(ctx context.Context, command func([]string) (string, error)) error {
 	if err = recoverTransaction(StateDir); err != nil {
 		return err
 	}
-	c := NewController(StateDir, command)
+	c := NewController(StateDir, nil)
+	c.CommandContext = command
 	if err = c.Load(); err != nil {
 		return err
 	}
@@ -201,7 +206,7 @@ func Daemon(ctx context.Context, command func([]string) (string, error)) error {
 			}
 			return e
 		}
-		go ServeConnection(conn, uint32(m.UID), c.Handle)
+		go ServeConnectionContext(conn, uint32(m.UID), c.HandleContext)
 	}
 }
 
