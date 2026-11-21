@@ -170,6 +170,9 @@ func TestGuardDockerSmoke(t *testing.T) {
 	require.NoError(t, fw.Apply(false))
 	t.Cleanup(func() { _ = fw.Remove() })
 	guardCommand(t, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1", "net.ipv4.conf.all.route_localnet=1")
+	// Like Kubernetes, the cluster DNS fixture needs br_netfilter: a reply bridged
+	// from the DNS pod is un-DNATed to the service address only by netfilter.
+	guardCommand(t, "sysctl", "-qw", "net.bridge.bridge-nf-call-iptables=1")
 	data := guardContainer(t, "21", "2")
 	apps := guardContainer(t, "22", "2")
 	dataPeer := guardContainer(t, "21", "3")

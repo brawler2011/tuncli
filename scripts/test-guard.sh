@@ -6,6 +6,8 @@ if [[ ${2:-} != --inside ]]; then
         command -v "$tool" >/dev/null || { echo "Guard smoke requires $tool" >&2; exit 1; }
     done
     [[ -c /dev/net/tun ]] || { echo 'Docker/TUN guard smoke requires /dev/net/tun' >&2; exit 1; }
+    [[ -e /proc/sys/net/bridge/bridge-nf-call-iptables ]] ||
+        { echo 'Docker/TUN guard smoke requires br_netfilter (modprobe br_netfilter)' >&2; exit 1; }
     export GUARD_HOST_NETNS
     GUARD_HOST_NETNS=$(readlink /proc/self/ns/net)
     if unshare --user --map-root-user --net true 2>/dev/null; then
