@@ -203,6 +203,9 @@ bridges is allowed by tuncli; Docker's own firewall still controls network
 isolation. Container internet traffic may be forwarded only through TUN, with
 established replies allowed back to the bridge. It remains blocked when TUN is
 down. This policy assumes the internet-facing interface is not a Linux bridge.
+IPv4 DNS whose destination is on the bridge it arrived from, such as a
+Kubernetes pod querying cluster DNS through its service address, is routed
+locally instead of being intercepted. DNS leaving the bridge still goes to TUN.
 
 Process crashes and systemd restarts leave protection in the kernel. An explicit
 `stop` cancels pending DNS, subscription downloads and connection checks before
