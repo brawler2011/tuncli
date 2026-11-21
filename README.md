@@ -301,6 +301,11 @@ domains separate when clients reuse a source port. Builds must include
 `sing v0.8.10` keys UDP NAT by both source and destination, preventing a socket
 sending to several domains from inheriting its first route. Patch provenance
 and changed files are documented in `third_party/sing/TUNCLI_PATCH.md`.
+A checked-in `sing-tun` patch keeps source-bound IPv6 traffic in TUN when an
+application changes its traffic class (including OpenSSH's interactive/batch QoS
+switch). Its provenance is in `third_party/sing-tun/TUNCLI_PATCH.md`. The real
+TUN suite changes EF -> CS0 -> EF on established IPv4/IPv6 TCP connections
+through both direct and VPN routes.
 Client DNS A/AAAA requests receive FakeIP addresses
 from `198.18.0.0/15` and `fc00::/18`. The TUN interface also captures IPv6.
 TCP and UDP DNS on port 53 are intercepted. sing-box restores the domain before

@@ -3,6 +3,7 @@
 package runner
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -282,6 +283,20 @@ func TestTUNSmoke(t *testing.T) {
 						}
 						smokePinnedTCP(t, saved[fmt.Sprintf("%s/%d", domain, dns.TypeA)], want, 22000+restart+10*int(def[0]))
 					}
+					if restart == 0 {
+						for _, domain := range []string{"ozon.ru", "gemini.google.com"} {
+							want := routing.Direct
+							if domain == "gemini.google.com" {
+								want = routing.VPN
+							}
+							for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+								fake := saved[fmt.Sprintf("%s/%d", domain, qtype)]
+								t.Run(fmt.Sprintf("qos-change/%s/%d", domain, qtype), func(t *testing.T) {
+									smokeTCPQoSChange(t, fake, want)
+								})
+							}
+						}
+					}
 					smokeReusedUDP(t, saved[fmt.Sprintf("ozon.ru/%d", dns.TypeA)], saved[fmt.Sprintf("gemini.google.com/%d", dns.TypeA)])
 					data, err := os.ReadFile(filepath.Join(dir, "dns.jsonl"))
 					require.NoError(t, err)
@@ -309,6 +324,47 @@ func TestTUNSmoke(t *testing.T) {
 				require.NoError(t, os.WriteFile(filepath.Join(dir, "dns.jsonl"), nil, 0600))
 			}
 		})
+	}
+}
+
+// OpenSSH changes QoS when switching between interactive and batch traffic.
+// This invalidates Linux's cached IPv6 route and requires a source-bound lookup.
+func smokeTCPQoSChange(t *testing.T, fake string, want routing.Outbound) {
+	t.Helper()
+	level, optionName := unix.IPPROTO_IP, unix.IP_TOS
+	if net.ParseIP(fake).To4() == nil {
+		level, optionName = unix.IPPROTO_IPV6, unix.IPV6_TCLASS
+	}
+	setQoS := func(raw syscall.RawConn, value int) error {
+		var socketErr error
+		err := raw.Control(func(fd uintptr) {
+			socketErr = unix.SetsockoptInt(int(fd), level, optionName, value)
+		})
+		if err != nil {
+			return err
+		}
+		return socketErr
+	}
+	dialer := &net.Dialer{Timeout: 3 * time.Second, Control: func(_, _ string, raw syscall.RawConn) error {
+		return setQoS(raw, 184) // EF, the initial OpenSSH traffic class.
+	}}
+	conn, err := dialer.Dial("tcp", net.JoinHostPort(fake, "8080"))
+	require.NoError(t, err)
+	defer conn.Close() //nolint:errcheck
+	require.NoError(t, conn.SetDeadline(time.Now().Add(3*time.Second)))
+	raw, err := conn.(*net.TCPConn).SyscallConn()
+	require.NoError(t, err)
+	reader := bufio.NewReader(conn)
+	for _, class := range []int{184, 0, 184} {
+		require.NoError(t, setQoS(raw, class))
+		_, err = io.WriteString(conn, "GET / HTTP/1.1\r\nHost: fixture\r\n\r\n")
+		require.NoError(t, err)
+		response, err := http.ReadResponse(reader, nil)
+		require.NoError(t, err, "TCP %s after traffic class %d", fake, class)
+		body, err := io.ReadAll(response.Body)
+		require.NoError(t, err)
+		require.NoError(t, response.Body.Close())
+		assert.Equal(t, string(want), string(body))
 	}
 }
 
