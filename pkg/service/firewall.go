@@ -34,13 +34,16 @@ func (NFT) Apply(direct bool) error {
 	return localDNSRoute(true)
 }
 
+// localDNSRoute deletes only rules matching every selector of its own, so
+// another rule sharing the priority survives.
 func localDNSRoute(add bool) error {
-	for exec.Command("/usr/sbin/ip", "-4", "rule", "del", "pref", localDNSRule).Run() == nil {
+	rule := []string{"pref", localDNSRule, "fwmark", localDNSMark + "/" + localDNSMark, "lookup", "main", "suppress_prefixlength", "0"}
+	for exec.Command("/usr/sbin/ip", append([]string{"-4", "rule", "del"}, rule...)...).Run() == nil {
 	}
 	if !add {
 		return nil
 	}
-	b, err := exec.Command("/usr/sbin/ip", "-4", "rule", "add", "pref", localDNSRule, "fwmark", localDNSMark+"/"+localDNSMark, "lookup", "main", "suppress_prefixlength", "0").CombinedOutput()
+	b, err := exec.Command("/usr/sbin/ip", append([]string{"-4", "rule", "add"}, rule...)...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("local DNS route: %w: %s", err, b)
 	}

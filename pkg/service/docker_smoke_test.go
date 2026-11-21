@@ -167,6 +167,14 @@ func guardContainerProbe(t *testing.T, pid int, network, address string, want bo
 func TestGuardDockerSmoke(t *testing.T) {
 	guardSmokeOnly(t)
 	fw := NFT{}
+	// Another owner's rule at the local DNS priority must survive apply and remove.
+	guardCommand(t, "ip", "-4", "rule", "add", "pref", localDNSRule, "lookup", "100")
+	require.NoError(t, fw.Apply(false))
+	require.NoError(t, fw.Remove())
+	rules, err := exec.Command("ip", "-4", "rule", "show", "pref", localDNSRule).CombinedOutput()
+	require.NoError(t, err)
+	require.Equal(t, localDNSRule+":\tfrom all lookup 100\n", string(rules))
+	guardCommand(t, "ip", "-4", "rule", "del", "pref", localDNSRule, "lookup", "100")
 	require.NoError(t, fw.Apply(false))
 	t.Cleanup(func() { _ = fw.Remove() })
 	guardCommand(t, "sysctl", "-qw", "net.ipv4.ip_forward=1", "net.ipv6.conf.all.forwarding=1", "net.ipv4.conf.all.route_localnet=1")
