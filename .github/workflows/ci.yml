@@ -45,6 +45,7 @@ jobs:
         run: |
           test -c /dev/net/tun || sudo modprobe tun
           test -c /dev/net/tun
+          sudo modprobe br_netfilter
       - name: Test real TUN routing in isolated namespaces
         run: |
           sudo apt-get update

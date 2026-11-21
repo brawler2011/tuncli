@@ -9,6 +9,15 @@ import (
 // Only this inet table belongs to tuncli. Updates are atomic nft transactions.
 const Table = "tuncli_guard"
 
+// IPv4 DNS between ports of one local bridge (Kubernetes pods querying cluster
+// DNS) carries this mark; the rule sends it to the main table ahead of sing-tun's
+// rules at 9000, which would hijack it into TUN. IPv6 is not covered: fib6 lookups
+// through sing-tun's rules do not see the bridge route.
+const (
+	localDNSMark = "0x00100000"
+	localDNSRule = "8999"
+)
+
 type Firewall interface {
 	Apply(direct bool) error
 	Remove() error
@@ -21,6 +30,22 @@ func (NFT) Apply(direct bool) error {
 	cmd.Stdin = strings.NewReader(script)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("nftables protection: %w: %s", err, b)
+	}
+	return localDNSRoute(true)
+}
+
+// localDNSRoute deletes only rules matching every selector of its own, so
+// another rule sharing the priority survives.
+func localDNSRoute(add bool) error {
+	rule := []string{"pref", localDNSRule, "fwmark", localDNSMark + "/" + localDNSMark, "lookup", "main", "suppress_prefixlength", "0"}
+	for exec.Command("/usr/sbin/ip", append([]string{"-4", "rule", "del"}, rule...)...).Run() == nil {
+	}
+	if !add {
+		return nil
+	}
+	b, err := exec.Command("/usr/sbin/ip", append([]string{"-4", "rule", "add"}, rule...)...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("local DNS route: %w: %s", err, b)
 	}
 	return nil
 }
@@ -45,9 +70,16 @@ add rule inet tuncli_guard output meta mark 356 ip daddr { 1.1.1.1, 8.8.8.8 } me
 add rule inet tuncli_guard forward meta iifkind "bridge" meta oifkind "bridge" accept
 add rule inet tuncli_guard forward meta iifkind "bridge" oifname "tuncli-tun0" accept
 add rule inet tuncli_guard forward iifname "tuncli-tun0" meta oifkind "bridge" ct state established,related accept
+` +
+		// Priority -90 follows Kubernetes service DNAT, so daddr is already the pod.
+		`add chain inet tuncli_guard prerouting { type filter hook prerouting priority -90; policy accept; }
+add rule inet tuncli_guard prerouting meta nfproto ipv4 meta iifkind "bridge" meta l4proto { tcp, udp } th dport 53 fib daddr . iif oif exists meta mark set meta mark | ` + localDNSMark + `
 `
 }
 func (NFT) Remove() error {
+	if err := localDNSRoute(false); err != nil {
+		return err
+	}
 	// delete is intentionally scoped; ENOENT is accepted only after checking absence.
 	cmd := exec.Command("/usr/sbin/nft", "delete", "table", "inet", Table)
 	if b, err := cmd.CombinedOutput(); err != nil {

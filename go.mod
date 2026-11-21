@@ -91,3 +91,6 @@ require (
 
 // Destination-aware UDP NAT fix; see third_party/sing/TUNCLI_PATCH.md.
 replace github.com/sagernet/sing => ./third_party/sing
+
+// Keep source-bound IPv6 route lookups in TUN after QoS changes.
+replace github.com/sagernet/sing-tun => ./third_party/sing-tun

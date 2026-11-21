@@ -103,6 +103,11 @@ func BuildSingboxConfigWithPolicy(ctx context.Context, node *config.Node, mode s
 	}
 
 	baseConfig := map[string]any{
+		// sing-box defaults to trace/debug logging, which logs every connection and
+		// DNS lookup and keeps the CPU awake on battery.
+		"log": map[string]any{
+			"level": "warn",
+		},
 		"dns": map[string]any{
 			"servers": []map[string]any{
 				{"tag": "dns-remote", "address": "https://1.1.1.1/dns-query", "detour": "proxy"},
